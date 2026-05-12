@@ -498,7 +498,7 @@ if os.path.exists(SERVER_FILE):
     with open(SERVER_FILE, encoding="utf-8", errors="replace") as f:
         content = f.read()
     patterns = re.findall(
-        r"app\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)['\"]",
+        "app\\.(get|post|put|patch|delete)\\s*\\(\\s*['\"]([^'\"]+)['\"]",
         content
     )
     server_count = 0
