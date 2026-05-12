@@ -491,6 +491,54 @@ for path, path_item in paths.items():
         if total_score >= 5:
             summary["high_risk"].append(full_path + " [" + method.upper() + "] score=" + str(total_score))
 
+# ── server.ts 라우트 추가 파싱 ────────────────────────────────────────────
+# swagger.yml은 B2B v2 API만 포함 → server.ts에서 /api/ 라우트 직접 추출
+SERVER_FILE = WS + "/src/server.ts"
+if os.path.exists(SERVER_FILE):
+    with open(SERVER_FILE, encoding="utf-8", errors="replace") as f:
+        content = f.read()
+    patterns = re.findall(
+        r"app\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)['\"]",
+        content
+    )
+    server_count = 0
+    for method, path in patterns:
+        # 이미 swagger.yml에 있는 경로 중복 방지
+        already_exists = any(
+            ep["path"] == path and ep["method"] == method.upper()
+            for ep in endpoints
+        )
+        if already_exists:
+            continue
+
+        biz_score, biz_cat, matched_kw = get_biz_score(path)
+        is_public   = True
+        total_score = biz_score + 2  # 외부공개 +2
+
+        entry = {
+            "path"        : path,
+            "method"      : method.upper(),
+            "summary"     : "",
+            "tags"        : [],
+            "biz_category": biz_cat,
+            "biz_score"   : biz_score,
+            "matched_kw"  : matched_kw,
+            "is_public"   : is_public,
+            "total_score" : total_score,
+            "params"      : [],
+            "auth_required": False,
+            "source"      : "server.ts"
+        }
+        endpoints.append(entry)
+
+        summary["total"] += 1
+        summary["by_category"][biz_cat] = summary["by_category"].get(biz_cat, 0) + 1
+        summary["by_method"][method.upper()] = summary["by_method"].get(method.upper(), 0) + 1
+        if total_score >= 5:
+            summary["high_risk"].append(path + " [" + method.upper() + "] score=" + str(total_score) + " (server.ts)")
+        server_count += 1
+    print("[server.ts] " + str(server_count) + "개 라우트 추가")
+
 # 점수 높은 순 정렬
 endpoints.sort(key=lambda x: x["total_score"], reverse=True)
 
