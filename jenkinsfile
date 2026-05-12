@@ -923,7 +923,6 @@ print("[저장] " + OUTPUT_FILE)
                 }
             }
         }
-    }
 
         // =====================================================================
         // stage 9 — Prometheus Pushgateway 메트릭 전송
@@ -1005,7 +1004,7 @@ trivy_pipe_build_status ${blockCount > 0 || baseScore >= 50.0 ? 0 : 1}
                 }
             }
         }
-    }
+    } // stages 끝
 
     post {
         always {
