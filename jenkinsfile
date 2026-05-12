@@ -925,6 +925,88 @@ print("[저장] " + OUTPUT_FILE)
         }
     }
 
+        // =====================================================================
+        // stage 9 — Prometheus Pushgateway 메트릭 전송
+        // 파이프라인 분석 결과를 Pushgateway로 push
+        // Prometheus가 수집 → Grafana 시각화
+        // =====================================================================
+        stage('9. Prometheus Push') {
+            steps {
+                script {
+                    def bizJson     = fileExists("${WORKSPACE}/output/business-risk-result.json")
+                        ? readJSON(file: "${WORKSPACE}/output/business-risk-result.json") : []
+                    def mergedJson  = fileExists("${WORKSPACE}/output/merged_vulns.json")
+                        ? readJSON(file: "${WORKSPACE}/output/merged_vulns.json") : []
+                    def semgrepJson = fileExists("${WORKSPACE}/output/semgrep-result.json")
+                        ? readJSON(file: "${WORKSPACE}/output/semgrep-result.json") : [results: []]
+
+                    def critCount   = 0
+                    def highCount   = 0
+                    def blockCount  = 0
+                    def warnCount   = 0
+                    def maxScore    = 0.0
+
+                    mergedJson.each { v ->
+                        def sev = (v.severity ?: '').toUpperCase()
+                        if (sev == 'CRITICAL') critCount++
+                        if (sev == 'HIGH')     highCount++
+                    }
+
+                    bizJson.each { v ->
+                        def score = v.finalScore as double
+                        if (score > maxScore)  maxScore = score
+                        if (score >= 14.0)     blockCount++
+                        else if (score >= 8.0) warnCount++
+                    }
+
+                    def semgrepCount = semgrepJson.results?.size() ?: 0
+                    def totalVulns   = critCount + highCount
+                    def critRatio    = totalVulns > 0 ? (critCount / totalVulns as double) : 0.0
+                    def highRatio    = totalVulns > 0 ? (highCount  / totalVulns as double) : 0.0
+                    def baseScore    = (critRatio * 100) + (highRatio * 40) + (semgrepCount * 0.2)
+
+                    def metrics = """# HELP trivy_pipe_risk_score 비즈니스 최고 Risk Score (20점 기준)
+# TYPE trivy_pipe_risk_score gauge
+trivy_pipe_risk_score ${String.format('%.2f', maxScore)}
+# HELP trivy_pipe_base_score 기본 리스크 점수 (비율 기반)
+# TYPE trivy_pipe_base_score gauge
+trivy_pipe_base_score ${String.format('%.1f', baseScore)}
+# HELP trivy_pipe_critical_count CRITICAL 취약점 수
+# TYPE trivy_pipe_critical_count gauge
+trivy_pipe_critical_count ${critCount}
+# HELP trivy_pipe_high_count HIGH 취약점 수
+# TYPE trivy_pipe_high_count gauge
+trivy_pipe_high_count ${highCount}
+# HELP trivy_pipe_total_vulns 전체 고유 취약점 수
+# TYPE trivy_pipe_total_vulns gauge
+trivy_pipe_total_vulns ${mergedJson.size()}
+# HELP trivy_pipe_block_count 차단(Block) 취약점 수
+# TYPE trivy_pipe_block_count gauge
+trivy_pipe_block_count ${blockCount}
+# HELP trivy_pipe_warn_count 경고(Warn) 취약점 수
+# TYPE trivy_pipe_warn_count gauge
+trivy_pipe_warn_count ${warnCount}
+# HELP trivy_pipe_semgrep_count Semgrep 발견 수
+# TYPE trivy_pipe_semgrep_count gauge
+trivy_pipe_semgrep_count ${semgrepCount}
+# HELP trivy_pipe_build_status 빌드 결과 (1=성공, 0=실패)
+# TYPE trivy_pipe_build_status gauge
+trivy_pipe_build_status ${blockCount > 0 || baseScore >= 50.0 ? 0 : 1}
+"""
+                    writeFile file: "${WORKSPACE}/output/metrics.txt", text: metrics
+
+                    sh """
+                        curl -s -X POST \\
+                            http://pushgateway:9091/metrics/job/trivy-pipe/instance/juice-shop \\
+                            --data-binary @${WORKSPACE}/output/metrics.txt \\
+                        && echo "✅ Prometheus Push 완료" \\
+                        || echo "⚠️ Prometheus Push 실패 (Pushgateway 미연결)"
+                    """
+                }
+            }
+        }
+    }
+
     post {
         always {
             archiveArtifacts artifacts: 'output/**', allowEmptyArchive: true
