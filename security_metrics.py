@@ -34,11 +34,30 @@ try:
     )
 except ImportError:
     import subprocess
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install",
-         "prometheus_client", "--break-system-packages", "-q"],
-        check=True
-    )
+
+    def _try_install():
+        # 방법 1: pip3 직접
+        r = subprocess.run(["pip3", "install", "prometheus_client", "-q"],
+                           capture_output=True)
+        if r.returncode == 0:
+            return True
+        # 방법 2: python3 -m pip
+        r = subprocess.run([sys.executable, "-m", "pip", "install",
+                            "prometheus_client", "-q"],
+                           capture_output=True)
+        if r.returncode == 0:
+            return True
+        # 방법 3: apt-get + pip3
+        subprocess.run(["apt-get", "install", "-y", "-q", "python3-pip"],
+                       capture_output=True)
+        r = subprocess.run(["pip3", "install", "prometheus_client", "-q"],
+                           capture_output=True)
+        return r.returncode == 0
+
+    if not _try_install():
+        print("[ERROR] prometheus_client 설치 실패 — 메트릭 전송 불가")
+        sys.exit(1)
+
     from prometheus_client import (
         CollectorRegistry, Gauge, push_to_gateway
     )
