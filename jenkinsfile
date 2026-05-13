@@ -498,7 +498,9 @@ if os.path.exists(SERVER_FILE):
         content = f.read()
 
     bs  = chr(92)
-    pat = "app" + bs + ".(get|post|put|patch|delete)" + bs + "s*" + bs + "(" + bs + "s*['\"]([^'\"]+)['\"]"
+    sq  = chr(39)   # single quote
+    dq  = chr(34)   # double quote
+    pat = "app" + bs + ".(get|post|put|patch|delete)" + bs + "s*" + bs + "(" + bs + "s*[" + sq + dq + "]([^" + sq + dq + "]+)[" + sq + dq + "]"
     patterns = re.findall(pat, content)
 
     existing      = set((ep["path"], ep["method"]) for ep in endpoints)
@@ -916,12 +918,17 @@ print("[저장] " + OUTPUT_FILE)
                     ======================================================
                     """
 
+                    // stage 9, 10(Prometheus Push)은 항상 실행되어야 하므로
+                    // error() 대신 unstable()로 처리 → 이후 stage 스킵 방지
                     if (blockCount > 0) {
-                        error("🚨 비즈니스 차단(Block) 취약점 ${blockCount}건 발견 (14점/20점 이상)! 빌드 차단!")
+                        unstable("🚨 비즈니스 차단(Block) 취약점 ${blockCount}건 발견 (14점/20점 이상)!")
+                        currentBuild.result = 'FAILURE'
                     } else if (baseScore >= 50.0) {
-                        error("🚨 기본 리스크 점수 ${baseScoreStr}점 ≥ 임계값 50점! 빌드 차단!")
+                        unstable("🚨 기본 리스크 점수 ${baseScoreStr}점 ≥ 임계값 50점!")
+                        currentBuild.result = 'FAILURE'
                     } else if (baseScore >= 30.0) {
                         echo "⚠️ 기본 리스크 점수 ${baseScoreStr}점 — 경고 구간 (30~50점), 배포 주의"
+                        currentBuild.result = 'UNSTABLE'
                     } else {
                         echo "✅ 리스크 점수 통과 (${baseScoreStr}점)"
                     }
