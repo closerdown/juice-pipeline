@@ -165,7 +165,6 @@ pipeline {
 
         // =====================================================================
         // stage 6.5 — Trivy + OWASP + npm audit CVE 병합 및 중복 제거
-        // source_count 필드 포함 → stage 7 신뢰도 가중치에 활용
         // =====================================================================
         stage('6.5. CVE Merge & Dedup') {
             steps {
@@ -246,8 +245,8 @@ def parse_owasp(path):
 
     for dep in root.iter(tag("dependency")):
         raw = dep.findtext(tag("fileName")) or ""
-        pkg = re.sub(r"\\.(tgz|jar|zip|tar\\.gz|war|ear)$", "", raw)
-        pkg = re.sub(r"-[\\d]+\\.[\\d].*$", "", pkg).lower().strip()
+        pkg = re.sub(r"\.(tgz|jar|zip|tar\.gz|war|ear)$", "", raw)
+        pkg = re.sub(r"-[\d]+\.[\d].*$", "", pkg).lower().strip()
 
         for vuln in dep.iter(tag("vulnerability")):
             vid = vuln.findtext(tag("name")) or ""
@@ -374,27 +373,35 @@ print("[저장]      " + OUTPUT_FILE)
         }
 
         // =====================================================================
-        // stage 6.7 — Swagger(OpenAPI) 분석
-        // swagger.yml 파싱 → endpoint별 path/method/bizScore 산정
-        // 결과 → output/swagger-analysis.json
-        // stage 7에서 publicRoutes 보완 및 외부공개(+2) 정확도 향상에 활용
-        // catchError: 실패해도 7, 8 stage 계속 진행
+        // stage 6.7 — Swagger(OpenAPI) + server.ts 분석
+        // swagger.yml → swagger.json 순서로 탐색, 없으면 server.ts만 파싱
+        // 정규식 백슬래시 문제: writeFile 밖에서 sh env 변수로 전달
         // =====================================================================
         stage('6.7. Swagger Analysis') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     script {
-                    def swaggerFile  = "${WORKSPACE}/src/swagger.yml"
-                    def outputFile   = "${WORKSPACE}/output/swagger-analysis.json"
-                    sh "rm -f ${outputFile}"
 
-                    if (!fileExists(swaggerFile)) {
-                        echo "⚠️ swagger.yml 없음 — Swagger 분석 스킵"
-                        return
-                    }
+                        // swagger 파일 탐색: yml → json 순서
+                        def swaggerFile = ""
+                        if (fileExists("${WORKSPACE}/src/swagger.yml")) {
+                            swaggerFile = "${WORKSPACE}/src/swagger.yml"
+                            echo "== swagger.yml 발견 =="
+                        } else if (fileExists("${WORKSPACE}/src/swagger.json")) {
+                            swaggerFile = "${WORKSPACE}/src/swagger.json"
+                            echo "== swagger.json 발견 =="
+                        } else {
+                            echo "⚠️ swagger 파일 없음 — server.ts 라우트만 분석합니다"
+                        }
 
-                    writeFile file: "${WORKSPACE}/output/parse_swagger.py", text: '''
+                        sh "rm -f ${WORKSPACE}/output/swagger-analysis.json"
+
+                        writeFile file: "${WORKSPACE}/output/parse_swagger.py", text: '''
 import json, os, re, sys
+
+WS           = os.environ["WORKSPACE"]
+SWAGGER_FILE = os.environ.get("SWAGGER_FILE", "")
+OUTPUT_FILE  = WS + "/output/swagger-analysis.json"
 
 try:
     import yaml
@@ -407,10 +414,6 @@ except ImportError:
         subprocess.run([sys.executable, "-m", "pip", "install", "pyyaml",
                         "--break-system-packages", "-q"], check=True)
     import yaml
-
-WS          = os.environ["WORKSPACE"]
-SWAGGER_FILE = WS + "/src/swagger.yml"
-OUTPUT_FILE  = WS + "/output/swagger-analysis.json"
 
 BIZ_CATEGORIES = [
     {"name": "payment",   "score": 5, "keywords": ["pay", "payment", "checkout", "purchase",
@@ -444,90 +447,76 @@ def get_biz_score(path_str):
                 return cat["score"], cat["name"], kw
     return 0, "internal", ""
 
-with open(SWAGGER_FILE, encoding="utf-8") as f:
-    spec = yaml.safe_load(f)
-
-base_path = (spec.get("basePath") or "").rstrip("/")
-paths     = spec.get("paths") or {}
-
 endpoints = []
 summary   = {"total": 0, "by_category": {}, "by_method": {}, "high_risk": []}
 
-for path, path_item in paths.items():
-    if not isinstance(path_item, dict):
-        continue
-    for method, operation in path_item.items():
-        if method.lower() not in PUBLIC_METHODS:
+# ── swagger 파일 파싱 ──────────────────────────────────────────────────────
+if SWAGGER_FILE and os.path.exists(SWAGGER_FILE):
+    print("[Swagger] 파싱: " + SWAGGER_FILE)
+    with open(SWAGGER_FILE, encoding="utf-8") as f:
+        spec = json.load(f) if SWAGGER_FILE.endswith(".json") else yaml.safe_load(f)
+
+    base_path = (spec.get("basePath") or "").rstrip("/")
+    paths     = spec.get("paths") or {}
+
+    for path, path_item in paths.items():
+        if not isinstance(path_item, dict):
             continue
-        if not isinstance(operation, dict):
-            continue
+        for method, operation in path_item.items():
+            if method.lower() not in PUBLIC_METHODS:
+                continue
+            if not isinstance(operation, dict):
+                continue
+            full_path   = base_path + path
+            biz_score, biz_cat, matched_kw = get_biz_score(full_path)
+            total_score = biz_score + 2
+            entry = {
+                "path": full_path, "method": method.upper(),
+                "summary": operation.get("summary", ""), "tags": operation.get("tags", []),
+                "biz_category": biz_cat, "biz_score": biz_score, "matched_kw": matched_kw,
+                "is_public": True, "total_score": total_score,
+                "params": [p.get("name", "") for p in (operation.get("parameters") or [])],
+                "auth_required": "security" in operation or "security" in spec,
+                "source": "swagger"
+            }
+            endpoints.append(entry)
+            summary["total"] += 1
+            summary["by_category"][biz_cat] = summary["by_category"].get(biz_cat, 0) + 1
+            summary["by_method"][method.upper()] = summary["by_method"].get(method.upper(), 0) + 1
+            if total_score >= 5:
+                summary["high_risk"].append(full_path + " [" + method.upper() + "] score=" + str(total_score))
+    print("[Swagger] " + str(len(endpoints)) + "개 endpoint 파싱 완료")
+else:
+    print("[Swagger] 파일 없음 — server.ts만 분석합니다")
 
-        full_path   = base_path + path
-        biz_score, biz_cat, matched_kw = get_biz_score(full_path)
-        is_public   = method.lower() in PUBLIC_METHODS
-        total_score = biz_score + (2 if is_public else 0)
-
-        entry = {
-            "path"        : full_path,
-            "method"      : method.upper(),
-            "summary"     : operation.get("summary", ""),
-            "tags"        : operation.get("tags", []),
-            "biz_category": biz_cat,
-            "biz_score"   : biz_score,
-            "matched_kw"  : matched_kw,
-            "is_public"   : is_public,
-            "total_score" : total_score,
-            "params"      : [p.get("name","") for p in (operation.get("parameters") or [])],
-            "auth_required": "security" in operation or "security" in spec
-        }
-        endpoints.append(entry)
-
-        summary["total"] += 1
-        summary["by_category"][biz_cat] = summary["by_category"].get(biz_cat, 0) + 1
-        summary["by_method"][method.upper()] = summary["by_method"].get(method.upper(), 0) + 1
-        if total_score >= 5:
-            summary["high_risk"].append(full_path + " [" + method.upper() + "] score=" + str(total_score))
-
-# ── server.ts 라우트 추가 파싱 ────────────────────────────────────────────
+# ── server.ts 라우트 파싱 ──────────────────────────────────────────────────
+# 백슬래시를 chr(92)로 런타임 조합 → Groovy/Python 이중 파싱 문제 완전 회피
 SERVER_FILE = WS + "/src/server.ts"
 if os.path.exists(SERVER_FILE):
     with open(SERVER_FILE, encoding="utf-8", errors="replace") as f:
         content = f.read()
-    # 백슬래시 없이 패턴 조합 (Groovy triple-quote 간섭 회피)
-    _dot   = chr(92) + "."
-    _ws    = chr(92) + "s*"
-    _lp    = chr(92) + "("
-    _pat   = "app" + _dot + "(get|post|put|patch|delete)" + _ws + _lp + _ws + "['\"]([^'\"]+)['\"]"
-    patterns = re.findall(_pat, content)
-    server_count = 0
+
+    bs  = chr(92)
+    pat = "app" + bs + ".(get|post|put|patch|delete)" + bs + "s*" + bs + "(" + bs + "s*['\"]([^'\"]+)['\"]"
+    patterns = re.findall(pat, content)
+
+    existing      = set((ep["path"], ep["method"]) for ep in endpoints)
+    server_count  = 0
+
     for method, path in patterns:
-        already_exists = any(
-            ep["path"] == path and ep["method"] == method.upper()
-            for ep in endpoints
-        )
-        if already_exists:
+        if (path, method.upper()) in existing:
             continue
-
         biz_score, biz_cat, matched_kw = get_biz_score(path)
-        is_public   = True
         total_score = biz_score + 2
-
         entry = {
-            "path"        : path,
-            "method"      : method.upper(),
-            "summary"     : "",
-            "tags"        : [],
-            "biz_category": biz_cat,
-            "biz_score"   : biz_score,
-            "matched_kw"  : matched_kw,
-            "is_public"   : is_public,
-            "total_score" : total_score,
-            "params"      : [],
-            "auth_required": False,
-            "source"      : "server.ts"
+            "path": path, "method": method.upper(),
+            "summary": "", "tags": [],
+            "biz_category": biz_cat, "biz_score": biz_score, "matched_kw": matched_kw,
+            "is_public": True, "total_score": total_score,
+            "params": [], "auth_required": False, "source": "server.ts"
         }
         endpoints.append(entry)
-
+        existing.add((path, method.upper()))
         summary["total"] += 1
         summary["by_category"][biz_cat] = summary["by_category"].get(biz_cat, 0) + 1
         summary["by_method"][method.upper()] = summary["by_method"].get(method.upper(), 0) + 1
@@ -535,26 +524,26 @@ if os.path.exists(SERVER_FILE):
             summary["high_risk"].append(path + " [" + method.upper() + "] score=" + str(total_score) + " (server.ts)")
         server_count += 1
     print("[server.ts] " + str(server_count) + "개 라우트 추가")
+else:
+    print("[server.ts] 파일 없음 — 스킵")
 
 endpoints.sort(key=lambda x: x["total_score"], reverse=True)
 
-result = {"endpoints": endpoints, "summary": summary}
-
 with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2, ensure_ascii=False)
+    json.dump({"endpoints": endpoints, "summary": summary}, f, indent=2, ensure_ascii=False)
 
 print("=== Swagger 분석 결과 ===")
 print("총 Endpoint  : " + str(summary["total"]) + "개")
 print("메서드 분포  : " + str(summary["by_method"]))
 print("카테고리 분포: " + str(summary["by_category"]))
-print("")
 print("--- 고위험 Endpoint (score >= 5) ---")
 for ep in summary["high_risk"]:
     print("  " + ep)
 print("[저장] " + OUTPUT_FILE)
 '''
 
-                    sh "python3 ${WORKSPACE}/output/parse_swagger.py"
+                        // SWAGGER_FILE을 환경변수로 전달 (빈 문자열이면 server.ts만 파싱)
+                        sh "SWAGGER_FILE='${swaggerFile}' python3 ${WORKSPACE}/output/parse_swagger.py"
                     }
                 }
             }
@@ -635,7 +624,7 @@ print("[저장] " + OUTPUT_FILE)
                             swaggerEndpoints.each { ep ->
                                 swaggerPublicPaths.add(ep.path?.toLowerCase() ?: '')
                             }
-                            echo "== Swagger Endpoint ${swaggerEndpoints.size()}개 로드 =="
+                            echo "== Swagger/server.ts Endpoint ${swaggerEndpoints.size()}개 로드 =="
                         } else {
                             echo "⚠️ swagger-analysis.json 없음 — Semgrep 결과만 사용"
                         }
