@@ -3,14 +3,11 @@ pipeline {
         label 'built-in'  
     }
 
-    // 동시 빌드 방지 — 이전 빌드 실행 중이면 새 빌드 대기
-    // @2, @3 workspace 생성 방지
     options {
         disableConcurrentBuilds()
     }
 
     triggers {
-        // GitHub 코드 푸시 시 자동 실행
         githubPush()
     }
 
@@ -106,7 +103,7 @@ pipeline {
                                 ls -lh package-lock.json || echo "루트 lockfile 없음"
                                 ls -lh frontend/package-lock.json || echo "frontend lockfile 없음"
 
-                                echo "=== Trivy 루트 스캔 (package-lock 기반) ==="
+                                echo "=== Trivy 루트 스캔 ==="
                                 trivy fs \\
                                     --scanners vuln \\
                                     --pkg-types library \\
@@ -117,7 +114,7 @@ pipeline {
                                     --skip-dirs frontend \\
                                     . || true
 
-                                echo "=== Trivy frontend 스캔 (package-lock 기반) ==="
+                                echo "=== Trivy frontend 스캔 ==="
                                 trivy fs \\
                                     --scanners vuln \\
                                     --pkg-types library \\
@@ -136,7 +133,7 @@ pipeline {
                                     --severity HIGH,CRITICAL \\
                                     ${WORKSPACE}/src/node_modules || true
 
-                                echo "=== Trivy SBOM 스캔 (bom.json 기반) ==="
+                                echo "=== Trivy SBOM 스캔 ==="
                                 if [ -f ${WORKSPACE}/src/frontend/dist/bom/bom.json ]; then
                                     trivy sbom \\
                                         --format json \\
@@ -171,9 +168,6 @@ pipeline {
             }
         }
 
-        // =====================================================================
-        // stage 6.5 — Trivy + OWASP + npm audit CVE 병합 및 중복 제거
-        // =====================================================================
         stage('6.5. CVE Merge & Dedup') {
             steps {
                 script {
@@ -238,7 +232,7 @@ def parse_trivy(paths):
                         "cvss"    : cvss,
                         "source"  : "trivy"
                     }
-    print("[Trivy]     " + str(len(vulns)) + "개 (루트+frontend+node_modules+SBOM 합산)")
+    print("[Trivy]     " + str(len(vulns)) + "개")
     return vulns
 
 def parse_owasp(path):
@@ -376,22 +370,15 @@ print("[저장]      " + OUTPUT_FILE)
             }
             post {
                 failure {
-                    echo "❌ CVE 병합 실패 — 이전 stage 결과를 확인하세요."
+                    echo "❌ CVE 병합 실패"
                 }
             }
         }
 
-        // =====================================================================
-        // stage 6.7 — Swagger(OpenAPI) + server.ts 분석
-        // swagger.yml → swagger.json 순서로 탐색, 없으면 server.ts만 파싱
-        // 정규식 백슬래시 문제: writeFile 밖에서 sh env 변수로 전달
-        // =====================================================================
         stage('6.7. Swagger Analysis') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     script {
-
-                        // swagger 파일 탐색: yml → json 순서
                         def swaggerFile = ""
                         if (fileExists("${WORKSPACE}/src/swagger.yml")) {
                             swaggerFile = "${WORKSPACE}/src/swagger.yml"
@@ -459,7 +446,6 @@ def get_biz_score(path_str):
 endpoints = []
 summary   = {"total": 0, "by_category": {}, "by_method": {}, "high_risk": []}
 
-# ── swagger 파일 파싱 ──────────────────────────────────────────────────────
 if SWAGGER_FILE and os.path.exists(SWAGGER_FILE):
     print("[Swagger] 파싱: " + SWAGGER_FILE)
     with open(SWAGGER_FILE, encoding="utf-8") as f:
@@ -498,16 +484,14 @@ if SWAGGER_FILE and os.path.exists(SWAGGER_FILE):
 else:
     print("[Swagger] 파일 없음 — server.ts만 분석합니다")
 
-# ── server.ts 라우트 파싱 ──────────────────────────────────────────────────
-# 백슬래시를 chr(92)로 런타임 조합 → Groovy/Python 이중 파싱 문제 완전 회피
 SERVER_FILE = WS + "/src/server.ts"
 if os.path.exists(SERVER_FILE):
     with open(SERVER_FILE, encoding="utf-8", errors="replace") as f:
         content = f.read()
 
     bs  = chr(92)
-    sq  = chr(39)   # single quote
-    dq  = chr(34)   # double quote
+    sq  = chr(39)
+    dq  = chr(34)
     pat = "app" + bs + ".(get|post|put|patch|delete)" + bs + "s*" + bs + "(" + bs + "s*[" + sq + dq + "]([^" + sq + dq + "]+)[" + sq + dq + "]"
     patterns = re.findall(pat, content)
 
@@ -553,7 +537,6 @@ for ep in summary["high_risk"]:
 print("[저장] " + OUTPUT_FILE)
 '''
 
-                        // SWAGGER_FILE을 환경변수로 전달 (빈 문자열이면 server.ts만 파싱)
                         sh "SWAGGER_FILE='${swaggerFile}' python3 ${WORKSPACE}/output/parse_swagger.py"
                     }
                 }
@@ -915,27 +898,20 @@ print("[저장] " + OUTPUT_FILE)
                     Swagger 고위험 Endpoint  : ${swaggerHighRisk}개 (score>=5)
                     ---------------------------
                     기본 리스크 점수         : ${baseScoreStr}점 ${baseGate}
-                      CRITICAL비율×100 = ${String.format('%.1f', criticalRatio * 100)}점
-                      HIGH비율×40      = ${String.format('%.1f', highRatio * 40)}점
-                      Semgrep×0.2      = ${String.format('%.1f', semgrepCount * 0.2)}점
-                    임계값: 차단 50점↑ / 경고 30점↑ / 정상 30점↓
-                    ---------------------------
                     비즈니스 최고 점수       : ${maxScoreStr}/20점
                     🔴 차단(Block) 14점 이상 : ${blockCount}건
                     🟠 경고(Warn)  8~13점    : ${warnCount}건
                     ======================================================
                     """
 
-                    // stage 9, 10(Prometheus Push)은 항상 실행되어야 하므로
-                    // error() 대신 unstable()로 처리 → 이후 stage 스킵 방지
                     if (blockCount > 0) {
-                        unstable("🚨 비즈니스 차단(Block) 취약점 ${blockCount}건 발견 (14점/20점 이상)!")
+                        unstable("🚨 비즈니스 차단(Block) 취약점 ${blockCount}건 발견!")
                         currentBuild.result = 'FAILURE'
                     } else if (baseScore >= 50.0) {
                         unstable("🚨 기본 리스크 점수 ${baseScoreStr}점 ≥ 임계값 50점!")
                         currentBuild.result = 'FAILURE'
                     } else if (baseScore >= 30.0) {
-                        echo "⚠️ 기본 리스크 점수 ${baseScoreStr}점 — 경고 구간 (30~50점), 배포 주의"
+                        echo "⚠️ 기본 리스크 점수 ${baseScoreStr}점 — 경고 구간"
                         currentBuild.result = 'UNSTABLE'
                     } else {
                         echo "✅ 리스크 점수 통과 (${baseScoreStr}점)"
@@ -944,9 +920,6 @@ print("[저장] " + OUTPUT_FILE)
             }
         }
 
-        // =====================================================================
-        // stage 9 — Prometheus Pushgateway 메트릭 전송
-        // =====================================================================
         stage('9. Prometheus Push') {
             steps {
                 script {
@@ -957,16 +930,20 @@ print("[저장] " + OUTPUT_FILE)
                     def semgrepJson = fileExists("${WORKSPACE}/output/semgrep-result.json")
                         ? readJSON(file: "${WORKSPACE}/output/semgrep-result.json") : [results: []]
 
-                    def critCount   = 0
-                    def highCount   = 0
-                    def blockCount  = 0
-                    def warnCount   = 0
-                    def maxScore    = 0.0
+                    def critCount  = 0
+                    def highCount  = 0
+                    def medCount   = 0
+                    def lowCount   = 0
+                    def blockCount = 0
+                    def warnCount  = 0
+                    def maxScore   = 0.0
 
                     mergedJson.each { v ->
                         def sev = (v.severity ?: '').toUpperCase()
                         if (sev == 'CRITICAL') critCount++
                         if (sev == 'HIGH')     highCount++
+                        if (sev == 'MEDIUM')   medCount++
+                        if (sev == 'LOW')      lowCount++
                     }
 
                     bizJson.each { v ->
@@ -976,11 +953,73 @@ print("[저장] " + OUTPUT_FILE)
                         else if (score >= 8.0) warnCount++
                     }
 
+                    // ── Semgrep 공격 표면 유형별 집계 ──────────────────────
+                    def attackSurface = [
+                        'sql-injection'     : 0,
+                        'xss'               : 0,
+                        'path-traversal'    : 0,
+                        'open-redirect'     : 0,
+                        'code-injection'    : 0,
+                        'hardcoded-secret'  : 0,
+                        'directory-listing' : 0,
+                        'other'             : 0
+                    ]
+
+                    semgrepJson.results?.each { finding ->
+                        def rule = (finding.check_id ?: '').toLowerCase()
+                        if (rule.contains('sql') || rule.contains('injection') || rule.contains('sequelize')) {
+                            attackSurface['sql-injection']++
+                        } else if (rule.contains('xss') || rule.contains('html-format') || rule.contains('raw-html')) {
+                            attackSurface['xss']++
+                        } else if (rule.contains('path') || rule.contains('traversal') || rule.contains('sendfile')) {
+                            attackSurface['path-traversal']++
+                        } else if (rule.contains('redirect')) {
+                            attackSurface['open-redirect']++
+                        } else if (rule.contains('code') || rule.contains('eval') || rule.contains('string-concat')) {
+                            attackSurface['code-injection']++
+                        } else if (rule.contains('secret') || rule.contains('hardcode') || rule.contains('jwt')) {
+                            attackSurface['hardcoded-secret']++
+                        } else if (rule.contains('directory') || rule.contains('listing')) {
+                            attackSurface['directory-listing']++
+                        } else {
+                            attackSurface['other']++
+                        }
+                    }
+
+                    // ── 이전 빌드 대비 변화율 계산 ─────────────────────────
+                    def prevCrit = 0
+                    def prevHigh = 0
+                    def prevMed  = 0
+                    def prevLow  = 0
+
+                    def prevMetricFile = "${WORKSPACE}/output/prev_metrics.json"
+                    if (fileExists(prevMetricFile)) {
+                        def prevData = readJSON file: prevMetricFile
+                        prevCrit = prevData.critCount ?: 0
+                        prevHigh = prevData.highCount ?: 0
+                        prevMed  = prevData.medCount  ?: 0
+                        prevLow  = prevData.lowCount  ?: 0
+                    }
+
+                    def changeCrit = critCount - prevCrit
+                    def changeHigh = highCount - prevHigh
+                    def changeMed  = medCount  - prevMed
+                    def changeLow  = lowCount  - prevLow
+
+                    // 현재 값 저장 (다음 빌드에서 이전값으로 사용)
+                    writeJSON file: prevMetricFile, json: [
+                        critCount: critCount,
+                        highCount: highCount,
+                        medCount : medCount,
+                        lowCount : lowCount
+                    ]
+
                     def semgrepCount = semgrepJson.results?.size() ?: 0
                     def totalVulns   = critCount + highCount
                     def critRatio    = totalVulns > 0 ? (critCount / totalVulns as double) : 0.0
                     def highRatio    = totalVulns > 0 ? (highCount  / totalVulns as double) : 0.0
                     def baseScore    = (critRatio * 100) + (highRatio * 40) + (semgrepCount * 0.2)
+                    def buildNum     = env.BUILD_NUMBER ?: '0'
 
                     def metrics = """# HELP trivy_pipe_risk_score 비즈니스 최고 Risk Score (20점 기준)
 # TYPE trivy_pipe_risk_score gauge
@@ -990,13 +1029,19 @@ trivy_pipe_risk_score ${String.format('%.2f', maxScore)}
 trivy_pipe_base_score ${String.format('%.1f', baseScore)}
 # HELP trivy_pipe_critical_count CRITICAL 취약점 수
 # TYPE trivy_pipe_critical_count gauge
-trivy_pipe_critical_count ${critCount}
+trivy_pipe_critical_count{build="${buildNum}"} ${critCount}
 # HELP trivy_pipe_high_count HIGH 취약점 수
 # TYPE trivy_pipe_high_count gauge
-trivy_pipe_high_count ${highCount}
+trivy_pipe_high_count{build="${buildNum}"} ${highCount}
+# HELP trivy_pipe_medium_count MEDIUM 취약점 수
+# TYPE trivy_pipe_medium_count gauge
+trivy_pipe_medium_count{build="${buildNum}"} ${medCount}
+# HELP trivy_pipe_low_count LOW 취약점 수
+# TYPE trivy_pipe_low_count gauge
+trivy_pipe_low_count{build="${buildNum}"} ${lowCount}
 # HELP trivy_pipe_total_vulns 전체 고유 취약점 수
 # TYPE trivy_pipe_total_vulns gauge
-trivy_pipe_total_vulns ${mergedJson.size()}
+trivy_pipe_total_vulns{build="${buildNum}"} ${mergedJson.size()}
 # HELP trivy_pipe_block_count 차단(Block) 취약점 수
 # TYPE trivy_pipe_block_count gauge
 trivy_pipe_block_count ${blockCount}
@@ -1009,26 +1054,45 @@ trivy_pipe_semgrep_count ${semgrepCount}
 # HELP trivy_pipe_build_status 빌드 결과 (1=성공, 0=실패)
 # TYPE trivy_pipe_build_status gauge
 trivy_pipe_build_status ${blockCount > 0 || baseScore >= 50.0 ? 0 : 1}
+# HELP trivy_pipe_build_number 현재 빌드 번호
+# TYPE trivy_pipe_build_number gauge
+trivy_pipe_build_number ${buildNum}
+# HELP trivy_pipe_vuln_change 이전 빌드 대비 취약점 변화 수
+# TYPE trivy_pipe_vuln_change gauge
+trivy_pipe_vuln_change{severity="CRITICAL"} ${changeCrit}
+trivy_pipe_vuln_change{severity="HIGH"} ${changeHigh}
+trivy_pipe_vuln_change{severity="MEDIUM"} ${changeMed}
+trivy_pipe_vuln_change{severity="LOW"} ${changeLow}
+# HELP trivy_pipe_attack_surface Semgrep 공격 표면 유형별 취약점 수
+# TYPE trivy_pipe_attack_surface gauge
+trivy_pipe_attack_surface{type="sql-injection"} ${attackSurface['sql-injection']}
+trivy_pipe_attack_surface{type="xss"} ${attackSurface['xss']}
+trivy_pipe_attack_surface{type="path-traversal"} ${attackSurface['path-traversal']}
+trivy_pipe_attack_surface{type="open-redirect"} ${attackSurface['open-redirect']}
+trivy_pipe_attack_surface{type="code-injection"} ${attackSurface['code-injection']}
+trivy_pipe_attack_surface{type="hardcoded-secret"} ${attackSurface['hardcoded-secret']}
+trivy_pipe_attack_surface{type="directory-listing"} ${attackSurface['directory-listing']}
+trivy_pipe_attack_surface{type="other"} ${attackSurface['other']}
 """
                     writeFile file: "${WORKSPACE}/output/metrics.txt", text: metrics
 
                     sh """
+                        # Pushgateway 전송
                         curl -s -X POST \\
                             http://pushgateway:9091/metrics/job/trivy-pipe/instance/juice-shop \\
                             --data-binary @${WORKSPACE}/output/metrics.txt \\
                         && echo "✅ Prometheus Push 완료" \\
-                        || echo "⚠️ Prometheus Push 실패 (Pushgateway 미연결)"
+                        || echo "⚠️ Prometheus Push 실패"
+
+                        # node_exporter textfile collector용 복사
+                        mkdir -p /var/jenkins_home/metrics
+                        cp ${WORKSPACE}/output/metrics.txt /var/jenkins_home/metrics/trivy_pipe.prom
+                        echo "✅ textfile 복사 완료"
                     """
                 }
             }
         }
 
-        // =====================================================================
-        // stage 10 — 보안 결과 집계 + supplychain_* 메트릭 Pushgateway 전송
-        // 기존 stage 9의 trivy_pipe_* 메트릭은 그대로 유지
-        // 이 stage는 supplychain_* 신규 메트릭만 추가 전송
-        // security_metrics.py 위치: ${WORKSPACE}/output/security_metrics.py
-        // =====================================================================
         stage('10. Security Metrics Push') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
@@ -1060,7 +1124,7 @@ trivy_pipe_build_status ${blockCount > 0 || baseScore >= 50.0 ? 0 : 1}
             }
         }
 
-    } // stages 끝
+    }
 
     post {
         always {
