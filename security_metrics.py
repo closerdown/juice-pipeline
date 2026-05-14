@@ -494,13 +494,37 @@ def main():
     if not all_vulns:
         log.warning("⚠️ 파싱된 취약점 없음 — 메트릭 전송은 계속 진행합니다")
 
-    agg = aggregate(all_vulns)
-    log.info("[집계] 총 " + str(agg['total']) + "개")
-    log.info("  severity: " + str(agg['by_severity']))
-    log.info("  tool:     " + str(agg['by_tool']))
+    # ── 도구별 탐지 수는 all_vulns 기준 (중복 포함 원본 수치)
+    agg_all = aggregate(all_vulns)
+    log.info("[도구별 집계] 총 " + str(agg_all["total"]) + "개 (중복 포함)")
+    log.info("  severity: " + str(agg_all["by_severity"]))
+    log.info("  tool:     " + str(agg_all["by_tool"]))
+
+    # ── Risk Score / severity 수치는 merged_vulns 기준 (Stage 8과 동일)
+    # merged_vulns = 중복 제거된 123개 고유 취약점
+    if merged_vulns:
+        merged_for_score = [
+            {
+                "tool"    : v.get("source", "merged"),
+                "cve"     : v.get("vuln_id", ""),
+                "severity": v.get("severity", "LOW").upper(),
+                "package" : v.get("package", "unknown"),
+                "cvss"    : float(v.get("cvss", 0))
+            }
+            for v in merged_vulns
+        ]
+        agg = aggregate(merged_for_score)
+        log.info("[병합 기준 집계] 총 " + str(agg["total"]) + "개 (중복 제거)")
+        log.info("  severity: " + str(agg["by_severity"]))
+    else:
+        agg = agg_all
+        log.info("[merged_vulns 없음 — all_vulns 기준 사용]")
+
+    # by_tool 은 원본 수치 유지 (도구별 탐지 수는 중복 포함이 의미 있음)
+    agg["by_tool"] = agg_all["by_tool"]
 
     risk = calc_risk_score(agg, semgrep_count)
-    log.info("[Risk Score] " + str(risk['risk_score']) + "/100점")
+    log.info("[Risk Score] " + str(risk["risk_score"]) + "/100점 (merged 기준, Stage 8과 동일)")
 
     if merged_vulns:
         confidence = calc_confidence(merged_vulns)
@@ -522,10 +546,10 @@ def main():
     log.info("[Confidence] " + str(confidence))
 
     attack_surface = parse_attack_surface()
-    vuln_change    = calc_vuln_change(agg["by_severity"])
+    vuln_change    = calc_vuln_change(agg["by_severity"])  # merged 기준
 
     # ── build_status 판정 (Stage 8 임계값과 동일 기준) ──────────────────────
-    # 비율점수 >= 40점 OR CRITICAL >= 10개 OR HIGH >= 70개 -> FAIL
+    # merged 기준: 비율점수 >= 40점 OR CRITICAL >= 10개 OR HIGH >= 70개 -> FAIL
     by_sev       = agg["by_severity"]
     crit_count   = by_sev.get("CRITICAL", 0)
     high_count   = by_sev.get("HIGH", 0)
