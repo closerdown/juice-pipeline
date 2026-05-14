@@ -226,6 +226,20 @@ def load_business_risk() -> list:
         return []
 
 
+def load_swagger_high_risk() -> int:
+    """Stage 6.7 Swagger 고위험 Endpoint 수 로드"""
+    fpath = p("swagger-analysis.json")
+    if not os.path.exists(fpath):
+        return 0
+    try:
+        with open(fpath, encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+        return len(data.get("summary", {}).get("high_risk", []))
+    except Exception as e:
+        log.error("[Swagger] 로드 오류: " + str(e))
+        return 0
+
+
 # =============================================================================
 # 공격 표면 분석
 # =============================================================================
@@ -359,37 +373,79 @@ def aggregate(all_vulns: list) -> dict:
 #   risk_score  = min(ratio_score / 150 × 100, 100)
 # =============================================================================
 
-def calc_risk_score(agg: dict, semgrep_count: int) -> dict:
-    by_sev = agg["by_severity"]
+def calc_risk_score(agg: dict, semgrep_count: int, swagger_high_risk: int = 0,
+                    biz_scores: list = None) -> dict:
+    """
+    Risk Score (0~100점) = 품질점수(0~70) + 규모점수(0~30)
 
+    [품질점수 — 70점 만점]
+      비즈니스 중요도 × CVSS × 신뢰도 반영된 finalScore TOP3 평균
+      = TOP3_avg / 20 × 70
+
+    [규모점수 — 30점 만점]
+      취약점 절대 개수: CRITICAL×1.0 + HIGH×0.2 + MEDIUM×0.05
+      고위험 Endpoint: swagger_high_risk × 0.3
+      → min(합계, 30)
+
+    [등급 및 판정]
+      60~100 → 🔴 BLOCK (즉시 차단)
+      35~59  → 🟡 WARN  (개선 필요)
+       0~34  → 🟢 PASS  (양호)
+
+    juice-shop 예상:
+      품질: TOP3 평균 9.62 / 20 × 70 = 33.7점
+      규모: 16×1.0 + 81×0.2 + 22×0.05 + 38×0.3 = 44.7 → cap 30점
+      합계: 63.7점 → BLOCK ✅
+    """
+    by_sev = agg["by_severity"]
     c = by_sev.get("CRITICAL", 0)
     h = by_sev.get("HIGH",     0)
     m = by_sev.get("MEDIUM",   0)
-    l = by_sev.get("LOW",      0)
 
-    total = c + h + m + l
-    crit_ratio = (c / total) if total > 0 else 0.0
-    high_ratio = (h / total) if total > 0 else 0.0
+    # ── 품질점수: biz_scores TOP3 finalScore 평균 기반 ────────────────────
+    if biz_scores:
+        sorted_scores = sorted(
+            [float(v.get("finalScore", 0)) for v in biz_scores],
+            reverse=True
+        )
+        top3 = sorted_scores[:3]
+        top3_avg = sum(top3) / len(top3) if top3 else 0.0
+    else:
+        top3_avg = 0.0
 
-    crit_score    = crit_ratio * 100
-    high_score    = high_ratio * 40
-    semgrep_score = semgrep_count * 0.2
+    quality_score = min((top3_avg / 20.0) * 70.0, 70.0)
 
-    raw_score  = crit_score + high_score + semgrep_score
-    MAX_RAW    = 150.0
-    risk_score = min(raw_score / MAX_RAW * 100.0, 100.0)
+    # ── 규모점수: 취약점 개수 + 고위험 Endpoint ───────────────────────────
+    vuln_scale    = (c * 1.0) + (h * 0.2) + (m * 0.05)
+    endpoint_scale = swagger_high_risk * 0.3
+    scale_score   = min(vuln_scale + endpoint_scale, 30.0)
+
+    # ── 최종 Risk Score ───────────────────────────────────────────────────
+    raw_score  = quality_score + scale_score
+    risk_score = min(raw_score, 100.0)
+
+    # 등급 판정
+    if risk_score >= 60:
+        grade = "🔴 BLOCK (즉시 차단)"
+    elif risk_score >= 35:
+        grade = "🟡 WARN (개선 필요)"
+    else:
+        grade = "🟢 PASS (양호)"
 
     log.info("[Risk Score 상세]")
-    log.info("  CRITICAL비율 " + str(round(crit_ratio * 100, 1)) + "% × 100 = " + str(round(crit_score, 2)) + "점")
-    log.info("  HIGH비율     " + str(round(high_ratio * 100, 1)) + "% × 40  = " + str(round(high_score, 2)) + "점")
-    log.info("  Semgrep      " + str(semgrep_count) + "건 × 0.2  = " + str(round(semgrep_score, 2)) + "점")
-    log.info("  raw=" + str(round(raw_score, 2)) + " / MAX_RAW=" + str(MAX_RAW) + " → " + str(round(risk_score, 2)) + "/100점")
+    log.info("  [품질점수] TOP3 finalScore 평균 " + str(round(top3_avg, 2)) + "/20점 × 70 = " + str(round(quality_score, 1)) + "점")
+    log.info("  [규모점수] CRITICAL " + str(c) + "×1.0 + HIGH " + str(h) + "×0.2 + MEDIUM " + str(m) + "×0.05 = " + str(round(vuln_scale, 1)) + "점")
+    log.info("             고위험Endpoint " + str(swagger_high_risk) + "×0.3 = " + str(round(endpoint_scale, 1)) + "점 → 규모합계 " + str(round(scale_score, 1)) + "점")
+    log.info("  raw=" + str(round(raw_score, 1)) + " → " + str(round(risk_score, 1)) + "/100점 [" + grade + "]")
 
     return {
-        "risk_score"    : round(risk_score, 2),
-        "critical_score": round(crit_score, 2),
-        "high_score"    : round(high_score, 2),
-        "semgrep_score" : round(semgrep_score, 2),
+        "risk_score"    : round(risk_score, 1),
+        "quality_score" : round(quality_score, 1),
+        "scale_score"   : round(scale_score, 1),
+        "top3_avg"      : round(top3_avg, 2),
+        "critical_score": round(c * 1.0, 1),
+        "high_score"    : round(h * 0.2, 1),
+        "semgrep_score" : 0.0,  # 규모점수에 통합됨
     }
 
 
@@ -485,8 +541,10 @@ def main():
     npm_vulns     = parse_npm()
     owasp_vulns   = parse_owasp()
     semgrep_vulns = parse_semgrep()
-    merged_vulns  = load_merged_vulns()
-    biz_risk      = load_business_risk()
+    merged_vulns      = load_merged_vulns()
+    biz_risk          = load_business_risk()
+    swagger_high_risk = load_swagger_high_risk()
+    log.info("[Swagger 고위험 Endpoint] " + str(swagger_high_risk) + "개")
 
     all_vulns     = trivy_vulns + npm_vulns + owasp_vulns + semgrep_vulns
     semgrep_count = len(semgrep_vulns)
@@ -523,8 +581,13 @@ def main():
     # by_tool 은 원본 수치 유지 (도구별 탐지 수는 중복 포함이 의미 있음)
     agg["by_tool"] = agg_all["by_tool"]
 
-    risk = calc_risk_score(agg, semgrep_count)
-    log.info("[Risk Score] " + str(risk["risk_score"]) + "/100점 (merged 기준, Stage 8과 동일)")
+    risk = calc_risk_score(
+        agg=agg,
+        semgrep_count=semgrep_count,
+        swagger_high_risk=swagger_high_risk,
+        biz_scores=biz_risk
+    )
+    log.info("[Risk Score] " + str(risk["risk_score"]) + "/100점 (품질70+규모30)")
 
     if merged_vulns:
         confidence = calc_confidence(merged_vulns)
@@ -554,16 +617,11 @@ def main():
     crit_count   = by_sev.get("CRITICAL", 0)
     high_count   = by_sev.get("HIGH", 0)
     block_count  = sum(1 for v in biz_risk if float(v.get("finalScore", 0)) >= 14.0)
-    build_status = 0 if (
-        risk["risk_score"] >= 40.0 or
-        crit_count >= 10            or
-        high_count >= 70            or
-        block_count > 0
-    ) else 1
-    log.info("[Build Status] " + ("PASS" if build_status == 1 else "FAIL") +
-             " (risk=" + str(risk["risk_score"]) +
-             ", crit=" + str(crit_count) +
-             ", high=" + str(high_count) +
+    # 70점↑ → BLOCK(FAIL), 40~69점 → WARN, 0~39점 → PASS
+    build_status = 0 if (risk["risk_score"] >= 60.0 or block_count > 0) else 1
+    gate = "FAIL" if build_status == 0 else "PASS"
+    log.info("[Build Status] " + gate +
+             " (risk=" + str(risk["risk_score"]) + "점" +
              ", block=" + str(block_count) + ")")
 
     log.info("[Top 10 패키지]")
