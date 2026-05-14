@@ -352,7 +352,7 @@ def calc_risk_score(agg: dict, semgrep_count: int) -> dict:
     semgrep_penalty = semgrep_count * 0.2
 
     raw_score  = weighted_sum + critical_bonus + semgrep_penalty
-    MAX_RAW    = 500.0
+    MAX_RAW    = 450.0
     risk_score = min(raw_score / MAX_RAW * 100.0, 100.0)
 
     return {
