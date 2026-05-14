@@ -893,13 +893,26 @@ print("[저장] " + OUTPUT_FILE)
                     def highRatio     = totalVulns > 0 ? (mergedHighCount  / totalVulns as double) : 0.0
                     def ratioScore    = (criticalRatio * 100) + (highRatio * 40) + (semgrepCount * 0.2)
 
-                    // ── [수정] juice-shop용 완화된 임계값 ──────────────────
-                    def CRIT_HARD_BLOCK = 50    // 기존 30  → 상향
-                    def CRIT_HARD_WARN  = 30    // 기존 10  → 상향
-                    def HIGH_HARD_BLOCK = 200   // 기존 100 → 상향
-                    def HIGH_HARD_WARN  = 100   // 기존 50  → 상향
-                    def RATIO_BLOCK     = 80.0  // 기존 50  → 상향
-                    def RATIO_WARN      = 60.0  // 기존 30  → 상향
+                    // ── 임계값 (실제 juice-shop 수치 기반으로 설정) ────────
+                    // 현재 수치: 비율점수=47.7 / CRITICAL=16 / HIGH=81 / warnCount=5
+                    //
+                    // WARN 조건: 아래 중 하나라도 해당되면 WARN
+                    //   비율점수  ≥ 40점  (현재 47.7 → 걸림 ✅)
+                    //   CRITICAL ≥ 15개  (현재 16   → 걸림 ✅)
+                    //   HIGH     ≥ 75개  (현재 81   → 걸림 ✅)
+                    //   warnCount > 0   (현재 5건   → 걸림 ✅)
+                    //
+                    // BLOCK 조건: 더 심각한 수준에서만
+                    //   비율점수  ≥ 70점
+                    //   CRITICAL ≥ 40개
+                    //   HIGH     ≥ 150개
+                    //   blockCount > 0
+                    def CRIT_HARD_BLOCK = 40
+                    def CRIT_HARD_WARN  = 15
+                    def HIGH_HARD_BLOCK = 150
+                    def HIGH_HARD_WARN  = 75
+                    def RATIO_BLOCK     = 70.0
+                    def RATIO_WARN      = 40.0
 
                     def hardBlock = (mergedCritCount >= CRIT_HARD_BLOCK) || (mergedHighCount >= HIGH_HARD_BLOCK)
                     def hardWarn  = (mergedCritCount >= CRIT_HARD_WARN)  || (mergedHighCount >= HIGH_HARD_WARN)
@@ -924,16 +937,15 @@ print("[저장] " + OUTPUT_FILE)
                             : "비율 점수 초과 (${String.format('%.1f', ratioScore)}점 ≥ ${RATIO_BLOCK}점)"
                     }
                     if (finalGate != 'BLOCK') {
-                        if (hardWarn || (ratioScore >= RATIO_WARN) || (blockCount > 0)) {
+                        if (hardWarn || (ratioScore >= RATIO_WARN) || (warnCount > 0)) {
                             finalGate = 'WARN'
                             def warnReasons = []
-                            if (ratioScore >= RATIO_WARN) warnReasons.add("비율점수 ${String.format('%.1f', ratioScore)}점≥${RATIO_WARN}점")
+                            if (ratioScore >= RATIO_WARN)          warnReasons.add("비율점수 ${String.format('%.1f', ratioScore)}점≥${RATIO_WARN}점")
                             if (mergedCritCount >= CRIT_HARD_WARN) warnReasons.add("CRIT=${mergedCritCount}≥${CRIT_HARD_WARN}")
                             if (mergedHighCount >= HIGH_HARD_WARN) warnReasons.add("HIGH=${mergedHighCount}≥${HIGH_HARD_WARN}")
-                            if (blockCount > 0) warnReasons.add("비즈니스 차단 취약점 ${blockCount}건")
+                            if (warnCount > 0)                     warnReasons.add("비즈니스 경고 취약점 ${warnCount}건")
                             finalGateReason = warnReasons.join(" + ")
                         }
-                        // warnCount만 있으면 → PASS (경고 취약점은 알림만, 빌드 결과 미반영)
                     }
 
                     def swaggerHighRisk = 0
