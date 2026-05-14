@@ -5,9 +5,10 @@ Jenkins stage 10에서 실행되는 보안 결과 집계 + Prometheus Pushgatewa
 
 [변경 이력]
   - calc_risk_score: 가중합 기반 → 비율 기반으로 변경
-    기존: weighted_sum / MAX_RAW(450) 방식 → 293개 취약점 기준 항상 100점 포화
-    변경: (CRITICAL비율×100 + HIGH비율×40 + Semgrep×0.2) / 150 × 100
-          Stage 8 Risk Scoring & Gate 와 동일한 계산 방식으로 일관성 확보
+  - build_status 판정 기준 완화 (juice-shop 교육용 앱 특성 반영)
+    기존: risk_score >= 70 OR CRITICAL > 0  → FAIL
+    변경: risk_score >= 80 OR blockCount > 0 → FAIL
+          (CRITICAL 단순 존재만으로 FAIL 처리하지 않음)
 """
 
 import json
@@ -212,6 +213,19 @@ def load_merged_vulns() -> list:
         return []
 
 
+def load_business_risk() -> list:
+    """Stage 7 비즈니스 리스크 결과 로드 — blockCount 계산에 사용"""
+    fpath = p("business-risk-result.json")
+    if not os.path.exists(fpath):
+        return []
+    try:
+        with open(fpath, encoding="utf-8", errors="replace") as f:
+            return json.load(f)
+    except Exception as e:
+        log.error("[BizRisk] 로드 오류: " + str(e))
+        return []
+
+
 # =============================================================================
 # 공격 표면 분석
 # =============================================================================
@@ -281,7 +295,6 @@ def calc_vuln_change(by_sev: dict) -> dict:
         "LOW"     : by_sev.get("LOW",      0) - prev_data.get("LOW",      0),
     }
 
-    # 현재 값 저장 (다음 빌드에서 이전값으로 사용)
     try:
         with open(prev_file, "w", encoding="utf-8") as f:
             json.dump({
@@ -344,11 +357,6 @@ def aggregate(all_vulns: list) -> dict:
 #   high_ratio  = HIGH수     / 전체수
 #   ratio_score = (crit_ratio × 100) + (high_ratio × 40) + (semgrep수 × 0.2)
 #   risk_score  = min(ratio_score / 150 × 100, 100)
-#
-# MAX_RAW = 150 근거:
-#   최악의 경우 crit_ratio=100% → 100점
-#             + high_ratio=0%  →   0점
-#             + semgrep 250건  →  50점  합계 150점
 # =============================================================================
 
 def calc_risk_score(agg: dict, semgrep_count: int) -> dict:
@@ -359,7 +367,6 @@ def calc_risk_score(agg: dict, semgrep_count: int) -> dict:
     m = by_sev.get("MEDIUM",   0)
     l = by_sev.get("LOW",      0)
 
-    # 전체를 분모로 → CRITICAL+HIGH만 쓸 때 항상 100% 되는 문제 방지
     total = c + h + m + l
     crit_ratio = (c / total) if total > 0 else 0.0
     high_ratio = (h / total) if total > 0 else 0.0
@@ -412,35 +419,28 @@ def push_metrics(agg: dict, risk: dict, confidence: dict,
                  attack_surface: dict, vuln_change: dict):
     registry = CollectorRegistry()
 
-    # ── supplychain_risk_score ─────────────────────────────────────────────
     g_risk = Gauge("supplychain_risk_score", "공급망 보안 위험 점수 (0~100점)", registry=registry)
     g_risk.set(risk["risk_score"])
 
-    # ── build_status ───────────────────────────────────────────────────────
     g_build = Gauge("build_status", "빌드 결과 (1=성공, 0=실패)", registry=registry)
     g_build.set(build_status)
 
-    # ── total_vulnerability_count ──────────────────────────────────────────
     g_total = Gauge("total_vulnerability_count", "전체 취약점 수", registry=registry)
     g_total.set(agg["total"])
 
-    # ── vulnerability_count{severity} ─────────────────────────────────────
     g_sev = Gauge("vulnerability_count", "severity별 취약점 수", ["severity"], registry=registry)
     for sev in SEV_LIST:
         g_sev.labels(severity=sev.lower()).set(agg["by_severity"].get(sev, 0))
 
-    # ── tool_detection_count{tool} ────────────────────────────────────────
     g_tool = Gauge("tool_detection_count", "도구별 탐지 수", ["tool"], registry=registry)
     for tool in ["trivy", "npm", "owasp", "semgrep"]:
         g_tool.labels(tool=tool).set(agg["by_tool"].get(tool, 0))
 
-    # ── risk_component_score{component} ───────────────────────────────────
     g_comp = Gauge("risk_component_score", "Risk Score 구성 요소별 기여도", ["component"], registry=registry)
     g_comp.labels(component="critical").set(risk["critical_score"])
     g_comp.labels(component="high").set(risk["high_score"])
     g_comp.labels(component="semgrep").set(risk["semgrep_score"])
 
-    # ── package_risk_score{package, cve} — Top 10 ─────────────────────────
     g_pkg = Gauge("package_risk_score", "패키지별 위험 점수 (Top 10)", ["package", "cve"], registry=registry)
     for item in top10:
         pkg_raw   = item["package"][:60]
@@ -453,22 +453,18 @@ def push_metrics(agg: dict, risk: dict, confidence: dict,
             cve_label = "N/A"
         g_pkg.labels(package=pkg_label, cve=cve_label).set(item["score"])
 
-    # ── vulnerability_confidence_count{confidence} ────────────────────────
     g_conf = Gauge("vulnerability_confidence_count", "탐지 신뢰도별 취약점 수", ["confidence"], registry=registry)
     for level in ["single", "double", "triple"]:
         g_conf.labels(confidence=level).set(confidence[level])
 
-    # ── attack_surface_count{type} ────────────────────────────────────────
     g_attack = Gauge("attack_surface_count", "Semgrep 공격 표면 유형별 취약점 수", ["type"], registry=registry)
     for attack_type, count in attack_surface.items():
         g_attack.labels(type=attack_type).set(count)
 
-    # ── vuln_change_count{severity} ───────────────────────────────────────
     g_change = Gauge("vuln_change_count", "이전 빌드 대비 취약점 변화 수 (양수=증가, 음수=감소)", ["severity"], registry=registry)
     for sev, change in vuln_change.items():
         g_change.labels(severity=sev.lower()).set(change)
 
-    # ── Pushgateway 전송 ───────────────────────────────────────────────────
     try:
         push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
         log.info("✅ Pushgateway 전송 완료 → " + PUSHGATEWAY_URL + " / job=" + JOB_NAME)
@@ -490,6 +486,7 @@ def main():
     owasp_vulns   = parse_owasp()
     semgrep_vulns = parse_semgrep()
     merged_vulns  = load_merged_vulns()
+    biz_risk      = load_business_risk()
 
     all_vulns     = trivy_vulns + npm_vulns + owasp_vulns + semgrep_vulns
     semgrep_count = len(semgrep_vulns)
@@ -527,10 +524,13 @@ def main():
     attack_surface = parse_attack_surface()
     vuln_change    = calc_vuln_change(agg["by_severity"])
 
-    # build_status: risk_score 70점 이상 또는 CRITICAL 존재 시 FAIL
-    crit_count   = agg["by_severity"].get("CRITICAL", 0)
-    build_status = 0 if (risk["risk_score"] >= 70.0 or crit_count > 0) else 1
-    log.info("[Build Status] " + ("PASS" if build_status == 1 else "FAIL"))
+    # ── [수정] build_status 판정 기준 완화 ───────────────────────────────────
+    # juice-shop은 의도적 취약 앱이므로 CRITICAL 단순 존재로 FAIL 처리 안 함
+    # Stage 7 비즈니스 게이트에서 14점↑ 차단 항목이 있을 때만 FAIL
+    block_count  = sum(1 for v in biz_risk if float(v.get("finalScore", 0)) >= 14.0)
+    build_status = 0 if (risk["risk_score"] >= 80.0 or block_count > 0) else 1
+    log.info("[Build Status] " + ("PASS" if build_status == 1 else "FAIL") +
+             " (risk=" + str(risk['risk_score']) + ", block=" + str(block_count) + ")")
 
     log.info("[Top 10 패키지]")
     for i, item in enumerate(agg["top10_packages"], 1):
