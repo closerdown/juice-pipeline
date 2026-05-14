@@ -987,9 +987,12 @@ print("[저장] " + OUTPUT_FILE)
                     """
 
                     if (finalGate == 'BLOCK') {
-                        error("🚨 보안 게이트 차단: ${finalGateReason}")
+                        // error() 대신 result만 설정 → 9, 10 스테이지 계속 실행
+                        currentBuild.result = 'FAILURE'
+                        echo "🚨 보안 게이트 차단: ${finalGateReason}"
                     } else if (finalGate == 'WARN') {
-                        unstable("⚠️ 경고 구간 — 배포 주의: ${finalGateReason}")
+                        currentBuild.result = 'UNSTABLE'
+                        echo "⚠️ 경고 구간 — 배포 주의: ${finalGateReason}"
                     } else {
                         echo "✅ 리스크 점수 통과"
                     }
