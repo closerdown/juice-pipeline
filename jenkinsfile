@@ -1130,7 +1130,7 @@ trivy_pipe_warn_count ${warnCount}
 trivy_pipe_semgrep_count ${semgrepCount}
 # HELP trivy_pipe_build_status 빌드 결과 (1=성공, 0=실패)
 # TYPE trivy_pipe_build_status gauge
-trivy_pipe_build_status ${blockCount > 0 || baseScore >= 80.0 ? 0 : 1}
+trivy_pipe_build_status ${blockCount > 0 || baseScore >= 40.0 || critCount >= 10 || highCount >= 70 ? 0 : 1}
 # HELP trivy_pipe_build_number 현재 빌드 번호
 # TYPE trivy_pipe_build_number gauge
 trivy_pipe_build_number ${buildNum}
