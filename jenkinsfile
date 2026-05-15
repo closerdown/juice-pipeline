@@ -39,18 +39,12 @@ pipeline {
                         docker.image('node:20').inside('--user root') {
                             sh """
                                 node --version && npm --version && git --version
-
                                 npm install --legacy-peer-deps
-
                                 npm install --package-lock-only --legacy-peer-deps --ignore-scripts
-
                                 cd frontend && npm install --package-lock-only --legacy-peer-deps --ignore-scripts && cd ..
-
                                 ls -lh package-lock.json || echo "root lockfile missing"
                                 ls -lh frontend/package-lock.json || echo "frontend lockfile missing"
-
                                 npm audit --json > ${WORKSPACE}/output/npm-audit-root.json 2>/dev/null || true
-
                                 cd frontend && npm audit --json > ${WORKSPACE}/output/npm-audit-frontend.json 2>/dev/null || true
                             """
                         }
@@ -132,8 +126,8 @@ pipeline {
                         return
                     }
 
-                    // sh heredoc 사용: Groovy 파서가 내용을 파싱하지 않아 백슬래시 안전
-                    sh '''cat > "${WORKSPACE}/output/merge_vulns.py" << 'PYEOF'
+                    sh """
+                        cat > '${WORKSPACE}/output/merge_vulns.py' << 'PYEOF'
 import json, xml.etree.ElementTree as ET, os, re
 from collections import Counter
 
@@ -262,8 +256,8 @@ print("[merged] total=" + str(len(merged)))
 with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     json.dump(merged, f, indent=2, ensure_ascii=False)
 PYEOF
-'''
-                    sh 'python3 "${WORKSPACE}/output/merge_vulns.py"'
+                        python3 '${WORKSPACE}/output/merge_vulns.py'
+                    """
                 }
             }
             post {
@@ -279,11 +273,9 @@ PYEOF
                             echo "swagger.yml not found - skip"
                             return
                         }
-
                         sh "rm -f ${WORKSPACE}/output/swagger-analysis.json"
-
-                        // sh heredoc: 백슬래시가 Groovy 파서에 닿지 않음
-                        sh '''cat > "${WORKSPACE}/output/parse_swagger.py" << 'PYEOF'
+                        sh """
+                            cat > '${WORKSPACE}/output/parse_swagger.py' << 'PYEOF'
 import json, os, re, sys
 
 try:
@@ -383,8 +375,8 @@ with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
 print("total endpoints=" + str(summary["total"]))
 print("high_risk count=" + str(len(summary["high_risk"])))
 PYEOF
-'''
-                        sh 'python3 "${WORKSPACE}/output/parse_swagger.py"'
+                            python3 '${WORKSPACE}/output/parse_swagger.py'
+                        """
                     }
                 }
             }
@@ -496,7 +488,6 @@ PYEOF
                             }
 
                             vulnList.each { vuln ->
-                                // [버그 수정] cvss/source_count JSONNull 안전 처리
                                 def rawCvss = vuln.cvss
                                 def cvssScore = (rawCvss != null && !(rawCvss instanceof net.sf.json.JSONNull))
                                     ? (rawCvss as double) : 0.0
@@ -521,7 +512,7 @@ PYEOF
                                 }
 
                                 if (publicRoutes.any { r -> r.contains(pkgName) } ||
-                                    swaggerPublicPaths.any { p -> p.contains(pkgName) }) bizScore += 2
+                                    swaggerPublicPaths.any { pt -> pt.contains(pkgName) }) bizScore += 2
 
                                 def swaggerBonus = 0
                                 swaggerEndpoints.each { ep ->
@@ -540,7 +531,7 @@ PYEOF
                                     f.message?.contains(pkgName) || f.rule?.contains(pkgName) || f.file?.contains(pkgName)
                                 }) reachability = 1.5
 
-                                def rawSrc  = vuln.source_count
+                                def rawSrc   = vuln.source_count
                                 def srcCount = (rawSrc != null && !(rawSrc instanceof net.sf.json.JSONNull))
                                     ? (rawSrc as int) : 1
                                 def trustWeight = TRUST_WEIGHTS[Math.min(srcCount, TRUST_WEIGHTS.size()-1)] as double
@@ -560,7 +551,6 @@ PYEOF
                             }
                         }
 
-                        // 버블소트
                         def n = vulnBusinessScores.size()
                         for (int i = 0; i < n-1; i++)
                             for (int j = 0; j < n-i-1; j++)
@@ -615,7 +605,6 @@ PYEOF
 
                     if (fileExists("${WORKSPACE}/output/business-risk-result.json")) {
                         (readJSON file: "${WORKSPACE}/output/business-risk-result.json").each { v ->
-                            // [버그 수정] finalScore JSONNull 안전 처리
                             def raw = v.finalScore
                             def s   = (raw != null && !(raw instanceof net.sf.json.JSONNull)) ? (raw as double) : 0.0
                             if (s > maxFinal) maxFinal = s
@@ -623,14 +612,14 @@ PYEOF
                         }
                     }
 
-                    def total    = mergedHigh + mergedCrit
-                    def critR    = total > 0 ? (mergedCrit / total as double) : 0.0
-                    def highR    = total > 0 ? (mergedHigh  / total as double) : 0.0
-                    def base     = (critR * 100) + (highR * 40) + (semgrepCount * 0.2)
-
                     def swaggerHR = 0
                     if (fileExists("${WORKSPACE}/output/swagger-analysis.json"))
                         swaggerHR = (readJSON file: "${WORKSPACE}/output/swagger-analysis.json").summary?.high_risk?.size() ?: 0
+
+                    def total = mergedHigh + mergedCrit
+                    def critR = total > 0 ? (mergedCrit / total as double) : 0.0
+                    def highR = total > 0 ? (mergedHigh  / total as double) : 0.0
+                    def base  = (critR * 100) + (highR * 40) + (semgrepCount * 0.2)
 
                     echo "====== Risk Gate ======"
                     echo "CRITICAL:${mergedCrit} HIGH:${mergedHigh} Semgrep:${semgrepCount} SwaggerHighRisk:${swaggerHR}"
@@ -671,7 +660,6 @@ PYEOF
                         if (sev=='CRITICAL') crit++; if (sev=='HIGH') high++
                     }
                     bizJson.each { v ->
-                        // [버그 수정] finalScore JSONNull 안전 처리
                         def raw = v.finalScore
                         def s   = (raw != null && !(raw instanceof net.sf.json.JSONNull)) ? (raw as double) : 0.0
                         if (s > maxS) maxS = s
