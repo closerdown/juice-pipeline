@@ -349,17 +349,17 @@ def aggregate(all_vulns: list) -> dict:
         if score > pkg_scores[pkg]["score"]:
             pkg_scores[pkg] = {"score": score, "cve": cve, "severity": sev}
 
-    top10 = sorted(
+    all_packages = sorted(
         [{"package": k, **v} for k, v in pkg_scores.items()],
         key=lambda x: x["score"],
         reverse=True
-    )[:10]
+    )  # 전체 푸시 (Grafana에서 topk()로 필터링)
 
     return {
         "total"         : len(all_vulns),
         "by_severity"   : dict(by_severity),
         "by_tool"       : dict(by_tool),
-        "top10_packages": top10,
+        "top10_packages": all_packages,  # 이름 유지 (호환성)
     }
 
 
@@ -635,13 +635,14 @@ def main():
              " (risk=" + str(risk["risk_score"]) + "점" +
              ", block=" + str(block_count) + ")")
 
-    log.info("[Top 10 패키지]")
-    for i, item in enumerate(agg["top10_packages"], 1):
+    log.info("[전체 패키지 목록 — 상위 10개]")
+    for i, item in enumerate(agg["top10_packages"][:10], 1):
         log.info(
             "  " + str(i).rjust(2) + ". " +
             item['package'] + " | " + item['cve'] + " | " +
             item['severity'] + " | score=" + str(round(item['score'], 1))
         )
+    log.info("  ... 총 " + str(len(agg["top10_packages"])) + "개 패키지 Prometheus 전송")
 
     push_metrics(
         agg=agg,
