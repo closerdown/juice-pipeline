@@ -473,7 +473,8 @@ def calc_confidence(merged: list) -> dict:
 def push_metrics(agg: dict, risk: dict, confidence: dict,
                  top10: list, build_status: int,
                  attack_surface: dict, vuln_change: dict,
-                 total_raw: int = 0, swagger_high_risk: int = 0):
+                 total_raw: int = 0, swagger_high_risk: int = 0,
+                 merged_vulns: list = None):
     registry = CollectorRegistry()
 
     g_risk = Gauge("supplychain_risk_score", "공급망 보안 위험 점수 (0~100점)", registry=registry)
@@ -522,6 +523,24 @@ def push_metrics(agg: dict, risk: dict, confidence: dict,
         if not cve_label:
             cve_label = "N/A"
         g_pkg.labels(package=pkg_label, cve=cve_label, severity=sev_label).set(item["score"])
+
+    # ── CVE별 전체 취약점 목록 (merged_vulns 기준) ──────────────────────────
+    if merged_vulns:
+        SEV_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "UNKNOWN": 0}
+        g_vuln = Gauge("vuln_detail_score", "CVE별 전체 취약점 목록",
+                       ["vuln_id", "package", "severity", "source"], registry=registry)
+        for v in merged_vulns:
+            vid  = str(v.get("vuln_id", "N/A"))[:80]
+            pkg  = str(v.get("package", "unknown"))[:60]
+            sev  = v.get("severity", "LOW").upper()
+            src  = str(v.get("source", "unknown"))[:30]
+            cvss = float(v.get("cvss", 0))
+            vid  = re.sub(r'[^a-zA-Z0-9_.:\-]', '_', vid) or "N_A"
+            pkg  = re.sub(r'[^a-zA-Z0-9_.:\-]', '_', pkg) or "unknown"
+            src  = re.sub(r'[^a-zA-Z0-9_.:\-]', '_', src) or "unknown"
+            sev  = sev if sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"] else "UNKNOWN"
+            g_vuln.labels(vuln_id=vid, package=pkg, severity=sev, source=src).set(cvss)
+        log.info("[CVE 전체 목록] " + str(len(merged_vulns)) + "개 Prometheus 전송")
 
     g_conf = Gauge("vulnerability_confidence_count", "탐지 신뢰도별 취약점 수", ["confidence"], registry=registry)
     for level in ["single", "double", "triple"]:
@@ -672,8 +691,9 @@ def main():
         build_status=build_status,
         attack_surface=attack_surface,
         vuln_change=vuln_change,
-        total_raw=agg_all["total"],        # 293개 (중복 포함 전체 탐지 수)
-        swagger_high_risk=swagger_high_risk  # 고위험 Endpoint 수
+        total_raw=agg_all["total"],          # 293개 (중복 포함 전체 탐지 수)
+        swagger_high_risk=swagger_high_risk, # 고위험 Endpoint 수
+        merged_vulns=merged_vulns            # CVE별 전체 목록 푸시
     )
 
     log.info("=" * 60)
