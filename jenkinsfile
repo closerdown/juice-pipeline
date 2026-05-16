@@ -480,8 +480,8 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                                 def rawCvss   = vuln.cvss
                                 def cvssScore = 0.0
                                 try {
-                                    if (rawCvss != null && rawCvss.toString() != 'null')
-                                        cvssScore = Double.parseDouble(rawCvss.toString())
+                                    if (rawCvss != null && !(rawCvss instanceof net.sf.json.JSONNull))
+                                        cvssScore = rawCvss as double
                                 } catch (Exception e) { cvssScore = 0.0 }
                                 if (cvssScore == 0.0)
                                     cvssScore = (vuln.severity == 'CRITICAL') ? 9.0 : 7.0
@@ -591,8 +591,8 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                             def s = 0.0
                             try {
                                 def raw = v.finalScore
-                                if (raw != null && raw.toString() != 'null')
-                                    s = Double.parseDouble(raw.toString())
+                                if (raw != null && !(raw instanceof net.sf.json.JSONNull))
+                                    s = raw as double
                             } catch (Exception e) { s = 0.0 }
                             if (s > maxFinal) maxFinal = s
                             if (s >= 14.0) blockCount++
@@ -653,8 +653,8 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                         def s = 0.0
                         try {
                             def raw = v.finalScore
-                            if (raw != null && raw.toString() != 'null')
-                                s = Double.parseDouble(raw.toString())
+                            if (raw != null && !(raw instanceof net.sf.json.JSONNull))
+                                s = raw as double
                         } catch (Exception e) { s = 0.0 }
                         if (s > maxS) maxS = s
                         if (s >= 14.0) block++
