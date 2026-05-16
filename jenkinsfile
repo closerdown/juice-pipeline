@@ -14,10 +14,8 @@ pipeline {
         stage('1. Workspace Init') {
             steps {
                 sh """
-                    echo "== Init directories =="
                     rm -rf ${WORKSPACE}/src ${WORKSPACE}/output
-                    mkdir -p ${WORKSPACE}/src
-                    mkdir -p ${WORKSPACE}/output
+                    mkdir -p ${WORKSPACE}/src ${WORKSPACE}/output
                 """
             }
         }
@@ -25,8 +23,7 @@ pipeline {
         stage('2. Source Code Checkout') {
             steps {
                 dir("${WORKSPACE}/src") {
-                    git url: 'https://github.com/juice-shop/juice-shop.git',
-                        branch: 'master'
+                    git url: 'https://github.com/juice-shop/juice-shop.git', branch: 'master'
                     sh 'ls -la'
                 }
             }
@@ -38,12 +35,10 @@ pipeline {
                     script {
                         docker.image('node:20').inside('--user root') {
                             sh """
-                                node --version && npm --version && git --version
+                                node --version && npm --version
                                 npm install --legacy-peer-deps
                                 npm install --package-lock-only --legacy-peer-deps --ignore-scripts
                                 cd frontend && npm install --package-lock-only --legacy-peer-deps --ignore-scripts && cd ..
-                                ls -lh package-lock.json || echo "root lockfile missing"
-                                ls -lh frontend/package-lock.json || echo "frontend lockfile missing"
                                 npm audit --json > ${WORKSPACE}/output/npm-audit-root.json 2>/dev/null || true
                                 cd frontend && npm audit --json > ${WORKSPACE}/output/npm-audit-frontend.json 2>/dev/null || true
                             """
@@ -59,8 +54,7 @@ pipeline {
                     script {
                         docker.image('returntocorp/semgrep:latest').inside('--user root') {
                             sh """
-                                semgrep --config=auto \\
-                                    --json \\
+                                semgrep --config=auto --json \\
                                     --output=${WORKSPACE}/output/semgrep-result.json \\
                                     . || true
                             """
@@ -126,8 +120,7 @@ pipeline {
                         return
                     }
 
-                    sh """
-                        cat > '${WORKSPACE}/output/merge_vulns.py' << 'PYEOF'
+                    writeFile file: "${WORKSPACE}/output/merge_vulns.py", text: '''
 import json, xml.etree.ElementTree as ET, os, re
 from collections import Counter
 
@@ -180,8 +173,8 @@ def parse_owasp(path):
     tag = lambda t: ("{" + ns + "}" + t) if ns else t
     for dep in root.iter(tag("dependency")):
         raw = dep.findtext(tag("fileName")) or ""
-        pkg = re.sub(r"\.(tgz|jar|zip|tar\.gz|war|ear)$", "", raw)
-        pkg = re.sub(r"-[\d]+\.[\d].*$", "", pkg).lower().strip()
+        pkg = re.sub(r"\\.(tgz|jar|zip|tar\\.gz|war|ear)$", "", raw)
+        pkg = re.sub(r"-[\\d]+\\.[\\d].*$", "", pkg).lower().strip()
         for vuln in dep.iter(tag("vulnerability")):
             vid = vuln.findtext(tag("name")) or ""
             if not (vid.startswith("CVE-") or vid.startswith("GHSA-")):
@@ -255,9 +248,8 @@ merged = merge(trivy, owasp, npm)
 print("[merged] total=" + str(len(merged)))
 with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     json.dump(merged, f, indent=2, ensure_ascii=False)
-PYEOF
-                        python3 '${WORKSPACE}/output/merge_vulns.py'
-                    """
+'''
+                    sh "python3 ${WORKSPACE}/output/merge_vulns.py"
                 }
             }
             post {
@@ -274,8 +266,8 @@ PYEOF
                             return
                         }
                         sh "rm -f ${WORKSPACE}/output/swagger-analysis.json"
-                        sh """
-                            cat > '${WORKSPACE}/output/parse_swagger.py' << 'PYEOF'
+
+                        writeFile file: "${WORKSPACE}/output/parse_swagger.py", text: '''
 import json, os, re, sys
 
 try:
@@ -349,7 +341,7 @@ SERVER_FILE = WS + "/src/server.ts"
 if os.path.exists(SERVER_FILE):
     with open(SERVER_FILE, encoding="utf-8", errors="replace") as f:
         content = f.read()
-    patterns = re.findall(r"app\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)['\"]", content)
+    patterns = re.findall("app\\\\.(get|post|put|patch|delete)\\\\s*\\\\(\\\\s*[\'\\"]([^\'\\"]+)[\'\\"]", content)
     server_count = 0
     for method, path in patterns:
         if any(ep["path"]==path and ep["method"]==method.upper() for ep in endpoints):
@@ -374,9 +366,8 @@ with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     json.dump({"endpoints":endpoints,"summary":summary}, f, indent=2, ensure_ascii=False)
 print("total endpoints=" + str(summary["total"]))
 print("high_risk count=" + str(len(summary["high_risk"])))
-PYEOF
-                            python3 '${WORKSPACE}/output/parse_swagger.py'
-                        """
+'''
+                        sh "python3 ${WORKSPACE}/output/parse_swagger.py"
                     }
                 }
             }
@@ -472,10 +463,8 @@ PYEOF
                                                 if (v.CVSS[src] && cvss == 0.0) {
                                                     def v3 = v.CVSS[src]?.V3Score
                                                     def v2 = v.CVSS[src]?.V2Score
-                                                    if (v3 != null && !(v3 instanceof net.sf.json.JSONNull))
-                                                        cvss = v3 as double
-                                                    else if (v2 != null && !(v2 instanceof net.sf.json.JSONNull))
-                                                        cvss = v2 as double
+                                                    if (v3 != null) cvss = v3 as double
+                                                    else if (v2 != null) cvss = v2 as double
                                                 }
                                             }
                                         }
@@ -488,9 +477,8 @@ PYEOF
                             }
 
                             vulnList.each { vuln ->
-                                def rawCvss = vuln.cvss
-                                def cvssScore = (rawCvss != null && !(rawCvss instanceof net.sf.json.JSONNull))
-                                    ? (rawCvss as double) : 0.0
+                                def rawCvss   = vuln.cvss
+                                def cvssScore = (rawCvss != null) ? (rawCvss as double) : 0.0
                                 if (cvssScore == 0.0)
                                     cvssScore = (vuln.severity == 'CRITICAL') ? 9.0 : 7.0
 
@@ -518,9 +506,7 @@ PYEOF
                                 swaggerEndpoints.each { ep ->
                                     def epPath = (ep.path ?: '').toLowerCase()
                                     if (pkgName.length() >= 4 && epPath.contains(pkgName)) {
-                                        def rawBiz = ep.biz_score
-                                        def epBiz  = (rawBiz != null && !(rawBiz instanceof net.sf.json.JSONNull))
-                                            ? (rawBiz as int) : 0
+                                        def epBiz = (ep.biz_score != null) ? (ep.biz_score as int) : 0
                                         if (epBiz > swaggerBonus) swaggerBonus = epBiz
                                     }
                                 }
@@ -531,11 +517,8 @@ PYEOF
                                     f.message?.contains(pkgName) || f.rule?.contains(pkgName) || f.file?.contains(pkgName)
                                 }) reachability = 1.5
 
-                                def rawSrc   = vuln.source_count
-                                def srcCount = (rawSrc != null && !(rawSrc instanceof net.sf.json.JSONNull))
-                                    ? (rawSrc as int) : 1
+                                def srcCount    = (vuln.source_count != null) ? (vuln.source_count as int) : 1
                                 def trustWeight = TRUST_WEIGHTS[Math.min(srcCount, TRUST_WEIGHTS.size()-1)] as double
-
                                 def effectiveBiz = bizScore > 0 ? bizScore : 1
                                 def rawScore     = cvssScore * reachability * effectiveBiz * trustWeight
                                 def finalScore   = (rawScore / MAX_RAW) * 20.0
@@ -582,8 +565,7 @@ PYEOF
             steps {
                 script {
                     def semgrepCount = 0, mergedHigh = 0, mergedCrit = 0
-                    def npmHigh = 0, npmCrit = 0, maxFinal = 0.0
-                    def blockCount = 0, warnCount = 0
+                    def maxFinal = 0.0, blockCount = 0, warnCount = 0
 
                     if (fileExists("${WORKSPACE}/output/semgrep-result.json"))
                         semgrepCount = (readJSON file: "${WORKSPACE}/output/semgrep-result.json").results?.size() ?: 0
@@ -591,24 +573,17 @@ PYEOF
                     if (fileExists("${WORKSPACE}/output/merged_vulns.json")) {
                         (readJSON file: "${WORKSPACE}/output/merged_vulns.json").each { v ->
                             def sev = (v.severity ?: '').toUpperCase()
-                            if (sev == 'HIGH') mergedHigh++; if (sev == 'CRITICAL') mergedCrit++
-                        }
-                    }
-
-                    ["${WORKSPACE}/output/npm-audit-root.json",
-                     "${WORKSPACE}/output/npm-audit-frontend.json"].each { fp ->
-                        if (fileExists(fp)) (readJSON file: fp).vulnerabilities?.each { n, v ->
-                            def sev = v.severity?.toUpperCase()
-                            if (sev == 'HIGH') npmHigh++; if (sev == 'CRITICAL') npmCrit++
+                            if (sev == 'HIGH') mergedHigh++
+                            if (sev == 'CRITICAL') mergedCrit++
                         }
                     }
 
                     if (fileExists("${WORKSPACE}/output/business-risk-result.json")) {
                         (readJSON file: "${WORKSPACE}/output/business-risk-result.json").each { v ->
-                            def raw = v.finalScore
-                            def s   = (raw != null && !(raw instanceof net.sf.json.JSONNull)) ? (raw as double) : 0.0
+                            def s = (v.finalScore != null) ? (v.finalScore as double) : 0.0
                             if (s > maxFinal) maxFinal = s
-                            if (s >= 14.0) blockCount++; else if (s >= 8.0) warnCount++
+                            if (s >= 14.0) blockCount++
+                            else if (s >= 8.0) warnCount++
                         }
                     }
 
@@ -645,25 +620,25 @@ PYEOF
         stage('9. Prometheus Push') {
             steps {
                 script {
-                    def bizJson    = fileExists("${WORKSPACE}/output/business-risk-result.json")
+                    def bizJson     = fileExists("${WORKSPACE}/output/business-risk-result.json")
                         ? readJSON(file: "${WORKSPACE}/output/business-risk-result.json") : []
-                    def mergedJson = fileExists("${WORKSPACE}/output/merged_vulns.json")
+                    def mergedJson  = fileExists("${WORKSPACE}/output/merged_vulns.json")
                         ? readJSON(file: "${WORKSPACE}/output/merged_vulns.json") : []
                     def semgrepJson = fileExists("${WORKSPACE}/output/semgrep-result.json")
                         ? readJSON(file: "${WORKSPACE}/output/semgrep-result.json") : [results:[]]
 
-                    def crit=0, high=0, block=0, warn=0
-                    def maxS = 0.0
+                    def crit=0, high=0, block=0, warn=0, maxS=0.0
 
                     mergedJson.each { v ->
                         def sev = (v.severity?:'').toUpperCase()
-                        if (sev=='CRITICAL') crit++; if (sev=='HIGH') high++
+                        if (sev=='CRITICAL') crit++
+                        if (sev=='HIGH') high++
                     }
                     bizJson.each { v ->
-                        def raw = v.finalScore
-                        def s   = (raw != null && !(raw instanceof net.sf.json.JSONNull)) ? (raw as double) : 0.0
+                        def s = (v.finalScore != null) ? (v.finalScore as double) : 0.0
                         if (s > maxS) maxS = s
-                        if (s >= 14.0) block++; else if (s >= 8.0) warn++
+                        if (s >= 14.0) block++
+                        else if (s >= 8.0) warn++
                     }
 
                     def sc   = semgrepJson.results?.size() ?: 0
@@ -711,6 +686,25 @@ trivy_pipe_build_status ${block > 0 || base >= 50.0 ? 0 : 1}
             }
         }
 
+        stage('10. Security Metrics Push') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    script {
+                        sh """
+                            if ! python3 -c "import prometheus_client" 2>/dev/null; then
+                                apt-get update -qq 2>/dev/null || true
+                                apt-get install -y -q python3-pip 2>/dev/null || true
+                                python3 -m pip install prometheus_client --break-system-packages -q
+                            fi
+                            cp ${WORKSPACE}/security_metrics.py ${WORKSPACE}/output/security_metrics.py
+                            WORKSPACE=${WORKSPACE} PUSHGATEWAY_URL=pushgateway:9091 \\
+                                python3 ${WORKSPACE}/output/security_metrics.py
+                        """
+                    }
+                }
+            }
+        }
+
     } // end stages
 
     post {
@@ -726,5 +720,6 @@ trivy_pipe_build_status ${block > 0 || base >= 50.0 ? 0 : 1}
         }
         success { echo "Pipeline SUCCESS" }
         failure { echo "Pipeline FAILURE - check logs" }
+        unstable { echo "Pipeline UNSTABLE - security review needed" }
     }
 }
