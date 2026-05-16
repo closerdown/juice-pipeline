@@ -567,11 +567,14 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                     def semgrepCount = 0, mergedHigh = 0, mergedCrit = 0
                     def maxFinal = 0.0, blockCount = 0, warnCount = 0
 
-                    if (fileExists("${WORKSPACE}/output/semgrep-result.json"))
-                        semgrepCount = (readJSON file: "${WORKSPACE}/output/semgrep-result.json").results?.size() ?: 0
+                    if (fileExists("${WORKSPACE}/output/semgrep-result.json")) {
+                        def semJson = readJSON file: "${WORKSPACE}/output/semgrep-result.json"
+                        semgrepCount = semJson.results?.size() ?: 0
+                    }
 
                     if (fileExists("${WORKSPACE}/output/merged_vulns.json")) {
-                        (readJSON file: "${WORKSPACE}/output/merged_vulns.json").each { v ->
+                        def mergedJson = readJSON file: "${WORKSPACE}/output/merged_vulns.json"
+                        mergedJson.each { v ->
                             def sev = (v.severity ?: '').toUpperCase()
                             if (sev == 'HIGH') mergedHigh++
                             if (sev == 'CRITICAL') mergedCrit++
@@ -579,7 +582,8 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                     }
 
                     if (fileExists("${WORKSPACE}/output/business-risk-result.json")) {
-                        (readJSON file: "${WORKSPACE}/output/business-risk-result.json").each { v ->
+                        def bizJson = readJSON file: "${WORKSPACE}/output/business-risk-result.json"
+                        bizJson.each { v ->
                             def s = (v.finalScore != null) ? (v.finalScore as double) : 0.0
                             if (s > maxFinal) maxFinal = s
                             if (s >= 14.0) blockCount++
@@ -588,8 +592,10 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                     }
 
                     def swaggerHR = 0
-                    if (fileExists("${WORKSPACE}/output/swagger-analysis.json"))
-                        swaggerHR = (readJSON file: "${WORKSPACE}/output/swagger-analysis.json").summary?.high_risk?.size() ?: 0
+                    if (fileExists("${WORKSPACE}/output/swagger-analysis.json")) {
+                        def swaggerJson = readJSON file: "${WORKSPACE}/output/swagger-analysis.json"
+                        swaggerHR = swaggerJson.summary?.high_risk?.size() ?: 0
+                    }
 
                     def total = mergedHigh + mergedCrit
                     def critR = total > 0 ? (mergedCrit / total as double) : 0.0
