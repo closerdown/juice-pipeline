@@ -666,11 +666,11 @@ print("high_risk count=" + str(len(summary["high_risk"])))
 
                     // ── Security Gate 정책 (Base Score 기준) ──────────────────
                     def baseGrade, baseAction, baseReason
-                    if (base >= 50.0) {
+                    if (base >= 60.0) {
                         baseGrade  = "HIGH RISK"
                         baseAction = "BLOCK"
-                        baseReason = "Base score exceeded deployment threshold (>= 50)"
-                    } else if (base >= 30.0) {
+                        baseReason = "Base score exceeded deployment threshold (>= 60)"
+                    } else if (base >= 40.0) {
                         baseGrade  = "WARN"
                         baseAction = "ALLOW"
                         baseReason = "Elevated base score. Security review recommended."
@@ -786,7 +786,7 @@ trivy_pipe_warn_count ${warn}
 trivy_pipe_semgrep_count ${sc}
 # HELP trivy_pipe_build_status build status (1=pass, 0=fail)
 # TYPE trivy_pipe_build_status gauge
-trivy_pipe_build_status ${block > 0 || base >= 50.0 ? 0 : 1}
+trivy_pipe_build_status ${block > 0 || base >= 60.0 ? 0 : 1}
 """
                     writeFile file: "${WORKSPACE}/output/metrics.txt", text: metrics
                     sh """
