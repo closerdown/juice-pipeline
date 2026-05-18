@@ -53,10 +53,9 @@ SEV_WEIGHT = {"CRITICAL": 5, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 SEV_LIST   = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
 
 # ── Security Gate Threshold 상수 ──────────────────────────────────────────────
-THRESHOLD_CRITICAL_BLOCK = 80   # CRITICAL BLOCK — 즉시 조치 필요
-THRESHOLD_HIGH_RISK      = 60   # HIGH RISK      — 배포 차단
-THRESHOLD_WARN           = 40   # WARN           — 빌드 허용, 보안 검토 권고
-# 0 ~ THRESHOLD_WARN-1   = PASS — 정상 범위
+THRESHOLD_CRITICAL_BLOCK = 80
+THRESHOLD_HIGH_RISK      = 60
+THRESHOLD_WARN           = 40
 
 
 def p(filename):
@@ -154,6 +153,7 @@ def parse_npm() -> list:
 
 
 def parse_owasp() -> list:
+    """OWASP Dependency-Check JSON 리포트 파싱 (XML 대신 JSON 사용)"""
     vulns = []
     fpath = p("dependency-check-report.json")
     if not os.path.exists(fpath):
@@ -162,33 +162,73 @@ def parse_owasp() -> list:
     try:
         with open(fpath, encoding="utf-8", errors="replace") as f:
             data = json.load(f)
+
         sev_map = {
             "CRITICAL": "CRITICAL", "HIGH": "HIGH",
             "MEDIUM": "MEDIUM",     "MODERATE": "MEDIUM",
             "LOW": "LOW",           "INFO": "LOW"
         }
+
         for dep in data.get("dependencies", []):
             pkg = dep.get("fileName", "unknown")
             for vuln in dep.get("vulnerabilities", []):
-                vid  = vuln.get("name", "")
-                sev  = sev_map.get(vuln.get("severity", "").upper(), "LOW")
+                vid = vuln.get("name", "")
+                if not vid:
+                    continue
+                sev = sev_map.get(vuln.get("severity", "").upper(), "LOW")
+
+                # CVSS 점수 추출 — v3.1 → v3 → v2 순으로 우선순위
                 cvss = None
-                try:
-                    raw = float(
-                        vuln.get("cvssv3", {}).get("baseScore")
-                        or vuln.get("cvssv2", {}).get("score")
-                        or 0
-                    )
-                    if raw > 0:
-                        cvss = raw
-                except Exception:
-                    pass
+
+                # cvssv3 (OWASP JSON 표준 필드명)
+                for key in ["cvssv3", "cvssV3", "cvss3"]:
+                    cvssv3 = vuln.get(key) or {}
+                    for score_key in ["baseScore", "score"]:
+                        val = cvssv3.get(score_key)
+                        if val is not None:
+                            try:
+                                cvss = float(val)
+                                if cvss > 0:
+                                    break
+                            except (ValueError, TypeError):
+                                pass
+                    if cvss and cvss > 0:
+                        break
+
+                # cvssv2 fallback
+                if not cvss:
+                    for key in ["cvssv2", "cvssV2", "cvss2"]:
+                        cvssv2 = vuln.get(key) or {}
+                        for score_key in ["score", "baseScore"]:
+                            val = cvssv2.get(score_key)
+                            if val is not None:
+                                try:
+                                    cvss = float(val)
+                                    if cvss > 0:
+                                        break
+                                except (ValueError, TypeError):
+                                    pass
+                        if cvss and cvss > 0:
+                            break
+
+                # severity 기반 추정 (CVSS 없을 때)
+                if not cvss:
+                    SEV_FALLBACK = {
+                        "CRITICAL": 9.0,
+                        "HIGH": 7.5,
+                        "MEDIUM": 5.5,
+                        "LOW": 2.0
+                    }
+                    cvss = SEV_FALLBACK.get(sev, 5.0)
+                    log.debug("[OWASP] CVSS 없음 → severity 추정: " + vid + " → " + str(cvss))
+
                 vulns.append({
                     "tool": "owasp", "cve": vid,
                     "severity": sev, "package": pkg, "cvss": cvss
                 })
     except Exception as e:
         log.error("[OWASP]  파싱 오류: " + str(e))
+
     log.info("[OWASP]  " + str(len(vulns)) + "개 파싱")
     return vulns
 
@@ -377,32 +417,32 @@ def calc_risk_score(agg: dict, semgrep_count: int, swagger_high_risk: int = 0,
     scale_score    = min(vuln_scale + endpoint_scale, 30.0)
     risk_score     = min(quality_score + scale_score, 100.0)
 
-    # ── Security Gate 정책 모델 (threshold 상수 기반) ──────────────────────────
+    # ── Security Gate 정책 모델 ────────────────────────────────────────────────
     COLOR_RESET = "\033[0m"
     if risk_score >= THRESHOLD_CRITICAL_BLOCK:
         grade  = "CRITICAL_BLOCK"
         status = "CRITICAL BLOCK"
         action = "BLOCK"
         reason = "Critical supply chain risk detected. Immediate remediation required."
-        color  = "\033[1;31m"   # 밝은 빨강
+        color  = "\033[1;31m"
     elif risk_score >= THRESHOLD_HIGH_RISK:
         grade  = "HIGH_RISK"
         status = "HIGH RISK"
         action = "BLOCK"
         reason = "Supply chain risk exceeded deployment threshold."
-        color  = "\033[0;31m"   # 빨강
+        color  = "\033[0;31m"
     elif risk_score >= THRESHOLD_WARN:
         grade  = "WARN"
         status = "WARN"
         action = "ALLOW"
         reason = "Elevated risk detected. Security review recommended before release."
-        color  = "\033[0;33m"   # 노랑
+        color  = "\033[0;33m"
     else:
         grade  = "PASS"
         status = "PASS"
         action = "ALLOW"
         reason = "Supply chain risk within acceptable range."
-        color  = "\033[0;32m"   # 초록
+        color  = "\033[0;32m"
 
     log.info("")
     log.info("=" * 55)
@@ -487,9 +527,11 @@ def push_metrics(agg, risk, confidence, top10, build_status,
             src      = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("source", "unknown"))[:30]) or "unknown"
             sev      = sev if sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"] else "UNKNOWN"
             cvss_val = safe_cvss(v)
-            g_vuln.labels(vuln_id=vid, package=pkg, severity=sev, source=src).set(
-                cvss_val if cvss_val is not None else -1
-            )
+            # CVSS 없으면 severity 기반 추정값 사용 (-1 대신)
+            if cvss_val is None:
+                SEV_FALLBACK = {"CRITICAL": 9.0, "HIGH": 7.5, "MEDIUM": 5.5, "LOW": 2.0}
+                cvss_val = SEV_FALLBACK.get(sev, 5.0)
+            g_vuln.labels(vuln_id=vid, package=pkg, severity=sev, source=src).set(cvss_val)
         log.info("[CVE 전체 목록] " + str(len(merged_vulns)) + "개 전송")
 
     g_conf = Gauge("vulnerability_confidence_count", "탐지 신뢰도별 취약점 수", ["confidence"], registry=registry)
@@ -554,7 +596,7 @@ def main():
 
     block_count  = sum(1 for v in biz_risk if float(v.get("finalScore", 0)) >= 14.0)
 
-    # ── CI/CD Security Gate — action 기반 빌드 차단 ──────────────────────────
+    # ── CI Security Gate — action 기반 빌드 차단 ──────────────────────────────
     build_status = 0 if (risk["action"] == "BLOCK" or block_count > 0) else 1
 
     log.info("[Build Status] " + ("FAIL" if build_status == 0 else "PASS") +
