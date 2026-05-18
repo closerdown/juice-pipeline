@@ -366,6 +366,39 @@ with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     json.dump({"endpoints":endpoints,"summary":summary}, f, indent=2, ensure_ascii=False)
 print("total endpoints=" + str(summary["total"]))
 print("high_risk count=" + str(len(summary["high_risk"])))
+
+print("")
+print("====== 고위험 공격 표면 (Attack Surface) ======")
+print("Method | Path                          | Category   | Score")
+print("-" * 65)
+
+# 엔드포인트를 total_score 기준 내림차순 정렬
+high_risk_eps = [ep for ep in endpoints if ep.get("total_score", 0) >= 5]
+high_risk_eps.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+
+for ep in high_risk_eps:
+    method   = ep.get("method", "").ljust(6)
+    path     = ep.get("path", "")[:40].ljust(40)
+    category = ep.get("biz_category", "").ljust(12)
+    score    = ep.get("total_score", 0)
+    kw       = ep.get("matched_kw", "")
+    source   = ep.get("source", "swagger")
+    print(f"  {method} | {path} | {category} | {score}점  [{kw}] ({source})")
+
+print("-" * 65)
+print(f"  총 {len(high_risk_eps)}개 고위험 Endpoint 탐지")
+print("")
+
+print("====== 메서드별 분포 ======")
+for method, cnt in sorted(summary["by_method"].items()):
+    bar = "■" * cnt
+    print(f"  {method.ljust(8)}: {bar} ({cnt})")
+
+print("")
+print("====== 비즈니스 카테고리별 분포 ======")
+for cat, cnt in sorted(summary["by_category"].items(), key=lambda x: -x[1]):
+    bar = "■" * cnt
+    print(f"  {cat.ljust(12)}: {bar} ({cnt})")
 '''
                         sh "python3 ${WORKSPACE}/output/parse_swagger.py"
                     }
