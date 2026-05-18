@@ -1,6 +1,12 @@
 """
 security_metrics.py
 Jenkins stage 10에서 실행되는 보안 결과 집계 + Prometheus Pushgateway 전송 스크립트.
+
+Security Gate 정책:
+  0~39   → PASS          (빌드 허용)
+  40~59  → WARN          (빌드 허용, 보안 검토 권고)
+  60~79  → HIGH RISK     (빌드 차단)
+  80+    → CRITICAL BLOCK (빌드 차단, 즉시 조치 필요)
 """
 
 import json
@@ -46,13 +52,18 @@ JOB_NAME        = "supplychain_scan"
 SEV_WEIGHT = {"CRITICAL": 5, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 SEV_LIST   = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
 
+# ── Security Gate Threshold 상수 ──────────────────────────────────────────────
+THRESHOLD_CRITICAL_BLOCK = 80   # CRITICAL BLOCK — 즉시 조치 필요
+THRESHOLD_HIGH_RISK      = 60   # HIGH RISK      — 배포 차단
+THRESHOLD_WARN           = 40   # WARN           — 빌드 허용, 보안 검토 권고
+# 0 ~ THRESHOLD_WARN-1   = PASS — 정상 범위
+
 
 def p(filename):
     return os.path.join(OUTPUT_DIR, filename)
 
 
 def safe_cvss(v):
-    """CVSS None/0 안전 처리 — None이면 None 반환"""
     val = v.get("cvss")
     if val is None:
         return None
@@ -64,7 +75,6 @@ def safe_cvss(v):
 
 
 def cvss_for_score(v):
-    """점수 계산용 — None이면 severity 기반 추정값 반환."""
     val = safe_cvss(v)
     if val is not None:
         return val
@@ -103,7 +113,6 @@ def parse_trivy() -> list:
                     })
         except Exception as e:
             log.error("[Trivy] 파싱 오류 (" + fpath + "): " + str(e))
-
     log.info("[Trivy]  " + str(len(vulns)) + "개 파싱")
     return vulns
 
@@ -140,7 +149,6 @@ def parse_npm() -> list:
                 })
         except Exception as e:
             log.error("[npm] 파싱 오류 (" + fpath + "): " + str(e))
-
     log.info("[npm]    " + str(len(vulns)) + "개 파싱")
     return vulns
 
@@ -154,7 +162,6 @@ def parse_owasp() -> list:
     try:
         with open(fpath, encoding="utf-8", errors="replace") as f:
             data = json.load(f)
-
         sev_map = {
             "CRITICAL": "CRITICAL", "HIGH": "HIGH",
             "MEDIUM": "MEDIUM",     "MODERATE": "MEDIUM",
@@ -182,7 +189,6 @@ def parse_owasp() -> list:
                 })
     except Exception as e:
         log.error("[OWASP]  파싱 오류: " + str(e))
-
     log.info("[OWASP]  " + str(len(vulns)) + "개 파싱")
     return vulns
 
@@ -196,7 +202,6 @@ def parse_semgrep() -> list:
     try:
         with open(fpath, encoding="utf-8", errors="replace") as f:
             data = json.load(f)
-
         sev_map = {
             "ERROR":   "HIGH",
             "WARNING": "MEDIUM",
@@ -213,7 +218,6 @@ def parse_semgrep() -> list:
             })
     except Exception as e:
         log.error("[Semgrep] 파싱 오류: " + str(e))
-
     log.info("[Semgrep] " + str(len(vulns)) + "개 파싱")
     return vulns
 
@@ -306,7 +310,6 @@ def calc_vuln_change(by_sev: dict) -> dict:
                 prev_data = json.load(f)
         except Exception:
             pass
-
     changes = {
         "CRITICAL": by_sev.get("CRITICAL", 0) - prev_data.get("CRITICAL", 0),
         "HIGH"    : by_sev.get("HIGH",     0) - prev_data.get("HIGH",     0),
@@ -332,10 +335,8 @@ def aggregate(all_vulns: list) -> dict:
         tool = v["tool"]
         pkg  = v["package"]
         cve  = v["cve"]
-
         by_severity[sev] += 1
         by_tool[tool]    += 1
-
         score = cvss_for_score(v)
         if score > pkg_scores[pkg]["score"]:
             pkg_scores[pkg] = {"score": score, "cve": cve, "severity": sev}
@@ -345,7 +346,6 @@ def aggregate(all_vulns: list) -> dict:
         key=lambda x: x["score"],
         reverse=True
     )
-
     return {
         "total"         : len(all_vulns),
         "by_severity"   : dict(by_severity),
@@ -377,15 +377,42 @@ def calc_risk_score(agg: dict, semgrep_count: int, swagger_high_risk: int = 0,
     scale_score    = min(vuln_scale + endpoint_scale, 30.0)
     risk_score     = min(quality_score + scale_score, 100.0)
 
-    # ── 차단 기준: 60점 이상 BLOCK, 35점 이상 WARN ──
-    if risk_score >= 60:
-        grade = "BLOCK"
-    elif risk_score >= 35:
-        grade = "WARN"
+    # ── Security Gate 정책 모델 (threshold 상수 기반) ──────────────────────────
+    COLOR_RESET = "\033[0m"
+    if risk_score >= THRESHOLD_CRITICAL_BLOCK:
+        grade  = "CRITICAL_BLOCK"
+        status = "CRITICAL BLOCK"
+        action = "BLOCK"
+        reason = "Critical supply chain risk detected. Immediate remediation required."
+        color  = "\033[1;31m"   # 밝은 빨강
+    elif risk_score >= THRESHOLD_HIGH_RISK:
+        grade  = "HIGH_RISK"
+        status = "HIGH RISK"
+        action = "BLOCK"
+        reason = "Supply chain risk exceeded deployment threshold."
+        color  = "\033[0;31m"   # 빨강
+    elif risk_score >= THRESHOLD_WARN:
+        grade  = "WARN"
+        status = "WARN"
+        action = "ALLOW"
+        reason = "Elevated risk detected. Security review recommended before release."
+        color  = "\033[0;33m"   # 노랑
     else:
-        grade = "PASS"
+        grade  = "PASS"
+        status = "PASS"
+        action = "ALLOW"
+        reason = "Supply chain risk within acceptable range."
+        color  = "\033[0;32m"   # 초록
 
-    log.info("[Risk Score] " + str(round(risk_score, 1)) + "/100점 → " + grade)
+    log.info("")
+    log.info("=" * 55)
+    log.info(color + "  Risk Score : " + str(round(risk_score, 1)) + "/100" + COLOR_RESET)
+    log.info(color + "  Status     : " + status + COLOR_RESET)
+    log.info(color + "  Action     : " + action + COLOR_RESET)
+    log.info(color + "  Reason     : " + reason + COLOR_RESET)
+    log.info("=" * 55)
+    log.info("")
+
     return {
         "risk_score"    : round(risk_score, 1),
         "quality_score" : round(quality_score, 1),
@@ -395,6 +422,9 @@ def calc_risk_score(agg: dict, semgrep_count: int, swagger_high_risk: int = 0,
         "high_score"    : round(h * 0.2, 1),
         "semgrep_score" : 0.0,
         "grade"         : grade,
+        "status"        : status,
+        "action"        : action,
+        "reason"        : reason,
     }
 
 
@@ -524,10 +554,13 @@ def main():
 
     block_count  = sum(1 for v in biz_risk if float(v.get("finalScore", 0)) >= 14.0)
 
-    # ── 차단 기준: 60점 이상 BLOCK ──
-    build_status = 0 if (risk["risk_score"] >= 60.0 or block_count > 0) else 1
+    # ── CI/CD Security Gate — action 기반 빌드 차단 ──────────────────────────
+    build_status = 0 if (risk["action"] == "BLOCK" or block_count > 0) else 1
+
     log.info("[Build Status] " + ("FAIL" if build_status == 0 else "PASS") +
-             " (score=" + str(risk["risk_score"]) + ", grade=" + risk["grade"] + ")")
+             " | score=" + str(risk["risk_score"]) +
+             " | status=" + risk["status"] +
+             " | action=" + risk["action"])
 
     push_metrics(
         agg=agg, risk=risk, confidence=confidence,
