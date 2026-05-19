@@ -557,17 +557,18 @@ def push_metrics(agg, risk, confidence, top10, build_status,
             sev      = v.get("severity", "LOW").upper()
             src      = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("source", "unknown"))[:30]) or "unknown"
             sev      = sev if sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"] else "UNKNOWN"
+            # CVSS 없으면 -1 (Grafana에서 "-"로 매핑)
             cvss_val = safe_cvss(v)
             if cvss_val is None:
-                SEV_FALLBACK = {"CRITICAL": 9.0, "HIGH": 7.5, "MEDIUM": 5.5, "LOW": 2.0}
-                cvss_val = SEV_FALLBACK.get(sev, 5.0)
+                cvss_val = -1
 
             # business-risk-result에서 reachability / bizScore / finalScore 가져오기
+            # biz_map에 없는 CVE(Pass 항목 등)는 "-"로 표시
             raw_vid = str(v.get("vuln_id", "")).strip()
-            biz     = biz_map.get(raw_vid, {})
-            reach   = str(round(float(biz.get("reachability", 1.0)), 1))   # "1.0" or "1.5"
-            bscore  = str(int(biz.get("bizScore", 0)))                      # "0" ~ "5"
-            fscore  = str(round(float(biz.get("finalScore", 0.0)), 2))      # "14.09" 등
+            biz     = biz_map.get(raw_vid)
+            reach   = str(round(float(biz.get("reachability", 1.0)), 1)) if biz else "-"
+            bscore  = str(int(biz.get("bizScore", 0)))                    if biz else "-"
+            fscore  = str(round(float(biz.get("finalScore", 0.0)), 2))    if biz else "-"
 
             g_vuln.labels(
                 vuln_id=vid, package=pkg, severity=sev, source=src,
