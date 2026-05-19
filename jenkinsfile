@@ -284,15 +284,88 @@ def merge(trivy, owasp, npm):
     merged.sort(key=lambda x: x["cvss"] if x["cvss"] is not None else -1, reverse=True)
     return merged
 
+def fetch_cvss_from_osv(vuln_id):
+    """OSV API로 GHSA/CVE CVSS 조회 — 실패 시 None 반환"""
+    import urllib.request, urllib.error
+    try:
+        url = "https://api.osv.dev/v1/vulns/" + vuln_id
+        req = urllib.request.Request(url, headers={"User-Agent": "juice-pipeline/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        # database_specific에서 숫자 점수 탐색
+        db = data.get("database_specific", {})
+        for key in ["cvss_score", "cvss", "severity_score"]:
+            score = db.get(key)
+            if score:
+                try:
+                    return float(score)
+                except (ValueError, TypeError):
+                    pass
+
+        # affected 안의 database_specific
+        for aff in data.get("affected", []):
+            db2 = aff.get("database_specific", {})
+            for key in ["cvss_score", "cvss"]:
+                score2 = db2.get(key)
+                if score2:
+                    try:
+                        return float(score2)
+                    except (ValueError, TypeError):
+                        pass
+
+        # severity[].score 가 숫자인 경우
+        for sev in data.get("severity", []):
+            raw = sev.get("score", "")
+            try:
+                val = float(raw)
+                if val > 0:
+                    return val
+            except (ValueError, TypeError):
+                pass
+
+        return None
+    except Exception:
+        return None
+
+
+def enrich_cvss_from_osv(merged):
+    """CVSS가 None인 GHSA/CVE 항목만 OSV API로 보완"""
+    targets = [v for v in merged if v["cvss"] is None
+               and (v["vuln_id"].startswith("GHSA-") or v["vuln_id"].startswith("CVE-"))]
+
+    if not targets:
+        print("[OSV] CVSS 없는 항목 없음 — 스킵")
+        return merged
+
+    print("[OSV] CVSS 보완 시도: " + str(len(targets)) + "개")
+    hit, miss = 0, 0
+    for v in targets:
+        score = fetch_cvss_from_osv(v["vuln_id"])
+        if score and score > 0:
+            v["cvss"] = score
+            hit += 1
+            print("[OSV] " + v["vuln_id"] + " → " + str(score))
+        else:
+            miss += 1
+
+    print("[OSV] 보완 성공: " + str(hit) + "개 / 실패: " + str(miss) + "개")
+    merged.sort(key=lambda x: x["cvss"] if x["cvss"] is not None else -1, reverse=True)
+    return merged
+
+
 trivy  = parse_trivy(TRIVY_FILES)
 owasp  = parse_owasp_json(OWASP_JSON)
 npm    = parse_npm(NPM_FILES)
 merged = merge(trivy, owasp, npm)
 print("[merged] total=" + str(len(merged)))
 
-# CVSS 없는 항목 통계
+# CVSS 없는 항목 OSV API로 보완
+merged = enrich_cvss_from_osv(merged)
+
+# 최종 통계
 none_count = sum(1 for v in merged if v["cvss"] is None)
-print("[CVSS 없음] " + str(none_count) + "개 (Grafana에서 '-' 표시)")
+print("[CVSS 없음] 최종 " + str(none_count) + "개 (Grafana에서 '-' 표시)")
 
 with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     json.dump(merged, f, indent=2, ensure_ascii=False)
