@@ -615,12 +615,24 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                                 def finalScore   = Math.min((rawScore / MAX_RAW) * 20.0 as double, 20.0 as double)
                                 def gate = finalScore >= 14.0 ? 'Block' : finalScore >= 8.0 ? 'Warn' : 'Pass'
 
-                                // ── 신규: 연결된 API 엔드포인트 추출 ─────────────────
+                                // ── 신규: 연결된 API 엔드포인트 추출 (bizCategory 기반) ──
                                 def connectedApis = []
-                                swaggerEndpoints.each { ep ->
-                                    def epPath = (ep.path ?: '').toLowerCase()
-                                    if (pkgName.length() >= 4 && epPath.contains(pkgName)) {
-                                        connectedApis.add(ep.path + " [" + ep.method + "]")
+                                if (bizCategory != 'internal') {
+                                    swaggerEndpoints.each { ep ->
+                                        if ((ep.biz_category == bizCategory) &&
+                                            (ep.biz_score != null && (ep.biz_score as int) > 0) &&
+                                            connectedApis.size() < 3) {
+                                            connectedApis.add(ep.path + " [" + ep.method + "]")
+                                        }
+                                    }
+                                    if (connectedApis.isEmpty() && matchedKw) {
+                                        swaggerEndpoints.each { ep ->
+                                            def epPath = (ep.path ?: '').toLowerCase()
+                                            if (matchedKw.length() >= 3 && epPath.contains(matchedKw) &&
+                                                connectedApis.size() < 3) {
+                                                connectedApis.add(ep.path + " [" + ep.method + "]")
+                                            }
+                                        }
                                     }
                                 }
                                 // Semgrep에서 발견된 파일 경로도 추가
