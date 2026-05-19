@@ -505,7 +505,7 @@ def calc_confidence(merged: list) -> dict:
 
 def push_metrics(agg, risk, confidence, top10, build_status,
                  attack_surface, vuln_change,
-                 total_raw=0, swagger_high_risk=0, merged_vulns=None):
+                 total_raw=0, swagger_high_risk=0, merged_vulns=None, biz_scores=None):
     registry = CollectorRegistry()
 
     Gauge("supplychain_risk_score", "공급망 보안 위험 점수 (0~100점)", registry=registry).set(risk["risk_score"])
@@ -540,8 +540,17 @@ def push_metrics(agg, risk, confidence, top10, build_status,
         g_pkg.labels(package=pkg, cve=cve, severity=sev).set(item["score"])
 
     if merged_vulns:
+        # business-risk-result.json을 CVE 기준으로 인덱싱
+        biz_map = {}
+        if biz_scores:
+            for b in biz_scores:
+                cve_key = str(b.get("cve", "")).strip()
+                if cve_key:
+                    biz_map[cve_key] = b
+
         g_vuln = Gauge("vuln_detail_score", "CVE별 전체 취약점 목록",
-                       ["vuln_id", "package", "severity", "source"], registry=registry)
+                       ["vuln_id", "package", "severity", "source",
+                        "reachability", "biz_score", "final_score"], registry=registry)
         for v in merged_vulns:
             vid      = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("vuln_id", "N/A"))[:80]) or "N_A"
             pkg      = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("package", "unknown"))[:60]) or "unknown"
@@ -549,11 +558,21 @@ def push_metrics(agg, risk, confidence, top10, build_status,
             src      = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("source", "unknown"))[:30]) or "unknown"
             sev      = sev if sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"] else "UNKNOWN"
             cvss_val = safe_cvss(v)
-            # CVSS 없으면 severity 기반 추정값 사용 (-1 대신)
             if cvss_val is None:
                 SEV_FALLBACK = {"CRITICAL": 9.0, "HIGH": 7.5, "MEDIUM": 5.5, "LOW": 2.0}
                 cvss_val = SEV_FALLBACK.get(sev, 5.0)
-            g_vuln.labels(vuln_id=vid, package=pkg, severity=sev, source=src).set(cvss_val)
+
+            # business-risk-result에서 reachability / bizScore / finalScore 가져오기
+            raw_vid = str(v.get("vuln_id", "")).strip()
+            biz     = biz_map.get(raw_vid, {})
+            reach   = str(round(float(biz.get("reachability", 1.0)), 1))   # "1.0" or "1.5"
+            bscore  = str(int(biz.get("bizScore", 0)))                      # "0" ~ "5"
+            fscore  = str(round(float(biz.get("finalScore", 0.0)), 2))      # "14.09" 등
+
+            g_vuln.labels(
+                vuln_id=vid, package=pkg, severity=sev, source=src,
+                reachability=reach, biz_score=bscore, final_score=fscore
+            ).set(cvss_val)
         log.info("[CVE 전체 목록] " + str(len(merged_vulns)) + "개 전송")
 
     g_conf = Gauge("vulnerability_confidence_count", "탐지 신뢰도별 취약점 수", ["confidence"], registry=registry)
@@ -631,7 +650,7 @@ def main():
         top10=agg["top10_packages"], build_status=build_status,
         attack_surface=attack_surface, vuln_change=vuln_change,
         total_raw=agg_all["total"], swagger_high_risk=swagger_high_risk,
-        merged_vulns=merged_vulns
+        merged_vulns=merged_vulns, biz_scores=biz_risk
     )
 
     log.info("=" * 60)
