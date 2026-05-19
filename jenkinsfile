@@ -578,7 +578,7 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                                 def trustWeight = TRUST_WEIGHTS[Math.min(srcCount, TRUST_WEIGHTS.size()-1)] as double
                                 def effectiveBiz = bizScore > 0 ? bizScore : 2
                                 def rawScore     = cvssScore * reachability * effectiveBiz * trustWeight
-                                def finalScore   = Math.min((rawScore / MAX_RAW) * 20.0, 20.0)
+                                def finalScore   = Math.min((rawScore / MAX_RAW) * 20.0 as double, 20.0 as double)
                                 def gate = finalScore >= 14.0 ? 'Block' : finalScore >= 8.0 ? 'Warn' : 'Pass'
 
                                 vulnBusinessScores.add([
