@@ -3,10 +3,10 @@ security_metrics.py
 Jenkins stage 10에서 실행되는 보안 결과 집계 + Prometheus Pushgateway 전송 스크립트.
 
 Security Gate 정책:
-  0~39   → PASS          (빌드 허용)
-  40~59  → WARN          (빌드 허용, 보안 검토 권고)
-  60~79  → HIGH RISK     (빌드 차단)
-  80+    → CRITICAL BLOCK (빌드 차단, 즉시 조치 필요)
+  0~39   → PASS
+  40~59  → WARN
+  60~79  → HIGH RISK
+  80+    → CRITICAL BLOCK
 """
 
 import json
@@ -17,12 +17,9 @@ import logging
 from collections import defaultdict
 
 try:
-    from prometheus_client import (
-        CollectorRegistry, Gauge, push_to_gateway
-    )
+    from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 except ImportError:
     import subprocess
-
     def _try_install():
         subprocess.run(["apt-get", "update", "-qq"], capture_output=True)
         subprocess.run(["apt-get", "install", "-y", "-q", "python3-pip"], capture_output=True)
@@ -32,14 +29,10 @@ except ImportError:
             capture_output=True
         )
         return r.returncode == 0
-
     if not _try_install():
         print("[ERROR] prometheus_client 설치 실패")
         sys.exit(1)
-
-    from prometheus_client import (
-        CollectorRegistry, Gauge, push_to_gateway
-    )
+    from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -52,7 +45,6 @@ JOB_NAME        = "supplychain_scan"
 SEV_WEIGHT = {"CRITICAL": 5, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 SEV_LIST   = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
 
-# ── Security Gate Threshold 상수 ──────────────────────────────────────────────
 THRESHOLD_CRITICAL_BLOCK = 80
 THRESHOLD_HIGH_RISK      = 60
 THRESHOLD_WARN           = 40
@@ -83,11 +75,7 @@ def cvss_for_score(v):
 
 def parse_trivy() -> list:
     vulns = []
-    files = [
-        p("trivy-result.json"),
-        p("trivy-frontend-result.json"),
-        p("trivy-nodemodules-result.json"),
-    ]
+    files = [p("trivy-result.json"), p("trivy-frontend-result.json"), p("trivy-nodemodules-result.json")]
     for fpath in files:
         if not os.path.exists(fpath):
             continue
@@ -106,10 +94,7 @@ def parse_trivy() -> list:
                         val = float(src.get("V3Score") or src.get("V2Score") or 0)
                         if val > 0:
                             cvss = max(cvss, val) if cvss is not None else val
-                    vulns.append({
-                        "tool": "trivy", "cve": vid,
-                        "severity": sev, "package": pkg, "cvss": cvss
-                    })
+                    vulns.append({"tool": "trivy", "cve": vid, "severity": sev, "package": pkg, "cvss": cvss})
         except Exception as e:
             log.error("[Trivy] 파싱 오류 (" + fpath + "): " + str(e))
     log.info("[Trivy]  " + str(len(vulns)) + "개 파싱")
@@ -118,11 +103,7 @@ def parse_trivy() -> list:
 
 def parse_npm() -> list:
     vulns = []
-    sev_map = {
-        "critical": "CRITICAL", "high": "HIGH",
-        "moderate": "MEDIUM",   "medium": "MEDIUM",
-        "low": "LOW",           "info": "LOW"
-    }
+    sev_map = {"critical": "CRITICAL", "high": "HIGH", "moderate": "MEDIUM", "medium": "MEDIUM", "low": "LOW", "info": "LOW"}
     files = [p("npm-audit-root.json"), p("npm-audit-frontend.json")]
     for fpath in files:
         if not os.path.exists(fpath):
@@ -132,7 +113,7 @@ def parse_npm() -> list:
                 data = json.load(f)
             for pkg_name, info in (data.get("vulnerabilities") or {}).items():
                 sev = sev_map.get(info.get("severity", "").lower(), "LOW")
-                cve  = ""
+                cve = ""
                 cvss = None
                 for via in (info.get("via") or []):
                     if isinstance(via, dict):
@@ -142,10 +123,7 @@ def parse_npm() -> list:
                             cvss = raw
                         if cve:
                             break
-                vulns.append({
-                    "tool": "npm", "cve": cve,
-                    "severity": sev, "package": pkg_name, "cvss": cvss
-                })
+                vulns.append({"tool": "npm", "cve": cve, "severity": sev, "package": pkg_name, "cvss": cvss})
         except Exception as e:
             log.error("[npm] 파싱 오류 (" + fpath + "): " + str(e))
     log.info("[npm]    " + str(len(vulns)) + "개 파싱")
@@ -153,7 +131,6 @@ def parse_npm() -> list:
 
 
 def parse_owasp() -> list:
-    """OWASP Dependency-Check JSON 리포트 파싱 (XML 대신 JSON 사용)"""
     vulns = []
     fpath = p("dependency-check-report.json")
     if not os.path.exists(fpath):
@@ -162,13 +139,7 @@ def parse_owasp() -> list:
     try:
         with open(fpath, encoding="utf-8", errors="replace") as f:
             data = json.load(f)
-
-        sev_map = {
-            "CRITICAL": "CRITICAL", "HIGH": "HIGH",
-            "MEDIUM": "MEDIUM",     "MODERATE": "MEDIUM",
-            "LOW": "LOW",           "INFO": "LOW"
-        }
-
+        sev_map = {"CRITICAL": "CRITICAL", "HIGH": "HIGH", "MEDIUM": "MEDIUM", "MODERATE": "MEDIUM", "LOW": "LOW", "INFO": "LOW"}
         for dep in data.get("dependencies", []):
             pkg = dep.get("fileName", "unknown")
             for vuln in dep.get("vulnerabilities", []):
@@ -176,7 +147,6 @@ def parse_owasp() -> list:
                 if not vid:
                     continue
                 sev = sev_map.get(vuln.get("severity", "").upper(), "LOW")
-
                 cvss = None
                 for key in ["cvssv3", "cvssV3", "cvss3"]:
                     cvssv3 = vuln.get(key) or {}
@@ -191,7 +161,6 @@ def parse_owasp() -> list:
                                 pass
                     if cvss and cvss > 0:
                         break
-
                 if not cvss:
                     for key in ["cvssv2", "cvssV2", "cvss2"]:
                         cvssv2 = vuln.get(key) or {}
@@ -206,24 +175,12 @@ def parse_owasp() -> list:
                                     pass
                         if cvss and cvss > 0:
                             break
-
                 if not cvss:
-                    SEV_FALLBACK = {
-                        "CRITICAL": 9.0,
-                        "HIGH": 7.5,
-                        "MEDIUM": 5.5,
-                        "LOW": 2.0
-                    }
+                    SEV_FALLBACK = {"CRITICAL": 9.0, "HIGH": 7.5, "MEDIUM": 5.5, "LOW": 2.0}
                     cvss = SEV_FALLBACK.get(sev, 5.0)
-                    log.debug("[OWASP] CVSS 없음 → severity 추정: " + vid + " → " + str(cvss))
-
-                vulns.append({
-                    "tool": "owasp", "cve": vid,
-                    "severity": sev, "package": pkg, "cvss": cvss
-                })
+                vulns.append({"tool": "owasp", "cve": vid, "severity": sev, "package": pkg, "cvss": cvss})
     except Exception as e:
         log.error("[OWASP]  파싱 오류: " + str(e))
-
     log.info("[OWASP]  " + str(len(vulns)) + "개 파싱")
     return vulns
 
@@ -237,20 +194,13 @@ def parse_semgrep() -> list:
     try:
         with open(fpath, encoding="utf-8", errors="replace") as f:
             data = json.load(f)
-        sev_map = {
-            "ERROR":   "HIGH",
-            "WARNING": "MEDIUM",
-            "INFO":    "LOW"
-        }
+        sev_map = {"ERROR": "HIGH", "WARNING": "MEDIUM", "INFO": "LOW"}
         for finding in data.get("results", []):
             sev_raw = (finding.get("extra", {}).get("severity") or "INFO").upper()
             sev     = sev_map.get(sev_raw, "LOW")
             pkg     = finding.get("path", "unknown")
             rule    = finding.get("check_id", "")
-            vulns.append({
-                "tool": "semgrep", "cve": rule,
-                "severity": sev, "package": pkg, "cvss": None
-            })
+            vulns.append({"tool": "semgrep", "cve": rule, "severity": sev, "package": pkg, "cvss": None})
     except Exception as e:
         log.error("[Semgrep] 파싱 오류: " + str(e))
     log.info("[Semgrep] " + str(len(vulns)) + "개 파싱")
@@ -295,38 +245,23 @@ def load_swagger_high_risk() -> int:
         return 0
 
 
-# ── 신규: CVSS 비교 결과 로드 ─────────────────────────────────────────────────
 def load_cvss_comparison() -> dict:
     fpath = p("cvss-comparison.json")
     if not os.path.exists(fpath):
         log.warning("[CVSSComp] 파일 없음 — 스킵")
-        return {
-            "upgraded": [],
-            "downgraded": [],
-            "summary": {"upgraded_count": 0, "downgraded_count": 0}
-        }
+        return {"upgraded": [], "downgraded": [], "summary": {"upgraded_count": 0, "downgraded_count": 0}}
     try:
         with open(fpath, encoding="utf-8", errors="replace") as f:
             return json.load(f)
     except Exception as e:
         log.error("[CVSSComp] 로드 오류: " + str(e))
-        return {
-            "upgraded": [],
-            "downgraded": [],
-            "summary": {"upgraded_count": 0, "downgraded_count": 0}
-        }
+        return {"upgraded": [], "downgraded": [], "summary": {"upgraded_count": 0, "downgraded_count": 0}}
 
 
 def parse_attack_surface() -> dict:
     attack_surface_map = {
-        "sql-injection"    : 0,
-        "xss"              : 0,
-        "path-traversal"   : 0,
-        "open-redirect"    : 0,
-        "code-injection"   : 0,
-        "hardcoded-secret" : 0,
-        "directory-listing": 0,
-        "other"            : 0
+        "sql-injection": 0, "xss": 0, "path-traversal": 0, "open-redirect": 0,
+        "code-injection": 0, "hardcoded-secret": 0, "directory-listing": 0, "other": 0
     }
     fpath = p("semgrep-result.json")
     if not os.path.exists(fpath):
@@ -386,7 +321,6 @@ def aggregate(all_vulns: list) -> dict:
     by_severity = defaultdict(int)
     by_tool     = defaultdict(int)
     pkg_scores  = defaultdict(lambda: {"score": 0.0, "cve": "", "severity": "LOW"})
-
     for v in all_vulns:
         sev  = v["severity"]
         tool = v["tool"]
@@ -397,53 +331,31 @@ def aggregate(all_vulns: list) -> dict:
         score = cvss_for_score(v)
         if score > pkg_scores[pkg]["score"]:
             pkg_scores[pkg] = {"score": score, "cve": cve, "severity": sev}
-
     all_packages = sorted(
         [{"package": k, **v} for k, v in pkg_scores.items()],
-        key=lambda x: x["score"],
-        reverse=True
+        key=lambda x: x["score"], reverse=True
     )
-    return {
-        "total"         : len(all_vulns),
-        "by_severity"   : dict(by_severity),
-        "by_tool"       : dict(by_tool),
-        "top10_packages": all_packages,
-    }
+    return {"total": len(all_vulns), "by_severity": dict(by_severity), "by_tool": dict(by_tool), "top10_packages": all_packages}
 
 
-def calc_risk_score(agg: dict, semgrep_count: int, swagger_high_risk: int = 0,
-                    biz_scores: list = None) -> dict:
+def calc_risk_score(agg: dict, semgrep_count: int, swagger_high_risk: int = 0, biz_scores: list = None) -> dict:
     by_sev = agg["by_severity"]
     c = by_sev.get("CRITICAL", 0)
     h = by_sev.get("HIGH",     0)
     m = by_sev.get("MEDIUM",   0)
 
     if biz_scores:
-        sorted_scores = sorted(
-            [float(v.get("finalScore", 0)) for v in biz_scores],
-            reverse=True
-        )
-
-        block_scores = sorted(
-            [float(v.get("finalScore", 0)) for v in biz_scores
-             if float(v.get("finalScore", 0)) >= 14.0],
-            reverse=True
-        )
-        warn_scores = sorted(
-            [float(v.get("finalScore", 0)) for v in biz_scores
-             if 8.0 <= float(v.get("finalScore", 0)) < 14.0],
-            reverse=True
-        )
-
+        sorted_scores = sorted([float(v.get("finalScore", 0)) for v in biz_scores], reverse=True)
+        block_scores  = sorted([float(v.get("finalScore", 0)) for v in biz_scores if float(v.get("finalScore", 0)) >= 14.0], reverse=True)
+        warn_scores   = sorted([float(v.get("finalScore", 0)) for v in biz_scores if 8.0 <= float(v.get("finalScore", 0)) < 14.0], reverse=True)
         if block_scores:
             block_avg = sum(block_scores) / len(block_scores)
             warn_avg  = sum(warn_scores[:3]) / min(len(warn_scores), 3) if warn_scores else 0.0
-            top_avg = block_avg * 0.7 + warn_avg * 0.3
+            top_avg   = block_avg * 0.7 + warn_avg * 0.3
         elif warn_scores:
             top_avg = sum(warn_scores[:3]) / min(len(warn_scores), 3)
         else:
             top_avg = sorted_scores[0] if sorted_scores else 0.0
-
         top3_avg = top_avg
     else:
         top3_avg = 0.0
@@ -456,27 +368,19 @@ def calc_risk_score(agg: dict, semgrep_count: int, swagger_high_risk: int = 0,
 
     COLOR_RESET = "\033[0m"
     if risk_score >= THRESHOLD_CRITICAL_BLOCK:
-        grade  = "CRITICAL_BLOCK"
-        status = "CRITICAL BLOCK"
-        action = "BLOCK"
+        grade = "CRITICAL_BLOCK"; status = "CRITICAL BLOCK"; action = "BLOCK"
         reason = "Critical supply chain risk detected. Immediate remediation required."
         color  = "\033[1;31m"
     elif risk_score >= THRESHOLD_HIGH_RISK:
-        grade  = "HIGH_RISK"
-        status = "HIGH RISK"
-        action = "BLOCK"
+        grade = "HIGH_RISK"; status = "HIGH RISK"; action = "BLOCK"
         reason = "Supply chain risk exceeded deployment threshold."
         color  = "\033[0;31m"
     elif risk_score >= THRESHOLD_WARN:
-        grade  = "WARN"
-        status = "WARN"
-        action = "ALLOW"
+        grade = "WARN"; status = "WARN"; action = "ALLOW"
         reason = "Elevated risk detected. Security review recommended before release."
         color  = "\033[0;33m"
     else:
-        grade  = "PASS"
-        status = "PASS"
-        action = "ALLOW"
+        grade = "PASS"; status = "PASS"; action = "ALLOW"
         reason = "Supply chain risk within acceptable range."
         color  = "\033[0;32m"
 
@@ -490,17 +394,10 @@ def calc_risk_score(agg: dict, semgrep_count: int, swagger_high_risk: int = 0,
     log.info("")
 
     return {
-        "risk_score"    : round(risk_score, 1),
-        "quality_score" : round(quality_score, 1),
-        "scale_score"   : round(scale_score, 1),
-        "top3_avg"      : round(top3_avg, 2),
-        "critical_score": round(c * 1.0, 1),
-        "high_score"    : round(h * 0.2, 1),
-        "semgrep_score" : 0.0,
-        "grade"         : grade,
-        "status"        : status,
-        "action"        : action,
-        "reason"        : reason,
+        "risk_score": round(risk_score, 1), "quality_score": round(quality_score, 1),
+        "scale_score": round(scale_score, 1), "top3_avg": round(top3_avg, 2),
+        "critical_score": round(c * 1.0, 1), "high_score": round(h * 0.2, 1),
+        "semgrep_score": 0.0, "grade": grade, "status": status, "action": action, "reason": reason,
     }
 
 
@@ -554,6 +451,7 @@ def push_metrics(agg, risk, confidence, top10, build_status,
         sev = sev if sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"] else "UNKNOWN"
         g_pkg.labels(package=pkg, cve=cve, severity=sev).set(item["score"])
 
+    # ── 신규: CVE 상세 — connectedApi, semgrepFile 포함 ─────────────────────
     if merged_vulns:
         biz_map = {}
         if biz_scores:
@@ -564,7 +462,10 @@ def push_metrics(agg, risk, confidence, top10, build_status,
 
         g_vuln = Gauge("vuln_detail_score", "CVE별 전체 취약점 목록",
                        ["vuln_id", "package", "severity", "source",
-                        "reachability", "biz_score", "final_score"], registry=registry)
+                        "reachability", "biz_score", "final_score",
+                        "connected_api", "semgrep_file"],   # 신규 label
+                       registry=registry)
+
         for v in merged_vulns:
             vid      = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("vuln_id", "N/A"))[:80]) or "N_A"
             pkg      = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("package", "unknown"))[:60]) or "unknown"
@@ -575,16 +476,26 @@ def push_metrics(agg, risk, confidence, top10, build_status,
             if cvss_val is None:
                 cvss_val = -1
 
-            raw_vid = str(v.get("vuln_id", "")).strip()
-            biz     = biz_map.get(raw_vid)
-            reach   = str(round(float(biz.get("reachability", 1.0)), 1)) if biz else "-"
-            bscore  = str(int(biz.get("bizScore", 0)))                    if biz else "-"
-            fscore  = str(round(float(biz.get("finalScore", 0.0)), 2))    if biz else "-"
+            raw_vid  = str(v.get("vuln_id", "")).strip()
+            biz      = biz_map.get(raw_vid)
+            reach    = str(round(float(biz.get("reachability", 1.0)), 1)) if biz else "-"
+            bscore   = str(int(biz.get("bizScore", 0)))                    if biz else "-"
+            fscore   = str(round(float(biz.get("finalScore", 0.0)), 2))    if biz else "-"
+
+            # connectedApis — 첫 번째 항목만 label에 (Prometheus label 길이 제한)
+            apis     = biz.get("connectedApis", []) if biz else []
+            conn_api = re.sub(r"[^a-zA-Z0-9_.:\-/]", "_", str(apis[0])[:80]) if apis else "-"
+
+            # semgrepFiles — 첫 번째 항목만
+            sfiles   = biz.get("semgrepFiles", []) if biz else []
+            sem_file = re.sub(r"[^a-zA-Z0-9_.:\-/]", "_", str(sfiles[0])[:80]) if sfiles else "-"
 
             g_vuln.labels(
                 vuln_id=vid, package=pkg, severity=sev, source=src,
-                reachability=reach, biz_score=bscore, final_score=fscore
+                reachability=reach, biz_score=bscore, final_score=fscore,
+                connected_api=conn_api, semgrep_file=sem_file
             ).set(cvss_val)
+
         log.info("[CVE 전체 목록] " + str(len(merged_vulns)) + "개 전송")
 
     g_conf = Gauge("vulnerability_confidence_count", "탐지 신뢰도별 취약점 수", ["confidence"], registry=registry)
@@ -599,9 +510,9 @@ def push_metrics(agg, risk, confidence, top10, build_status,
     for sev, change in vuln_change.items():
         g_change.labels(severity=sev.lower()).set(change)
 
-    # ── 신규: CVSS vs Business Risk 비교 메트릭 ──────────────────────────────
+    # ── CVSS vs Business Risk 비교 메트릭 ────────────────────────────────────
     if cvss_comparison:
-        summary = cvss_comparison.get("summary", {})
+        summary          = cvss_comparison.get("summary", {})
         upgraded_count   = summary.get("upgraded_count", 0)
         downgraded_count = summary.get("downgraded_count", 0)
 
@@ -615,33 +526,33 @@ def push_metrics(agg, risk, confidence, top10, build_status,
         g_upgraded = Gauge("cvss_upgraded_detail",
                            "CVSS 대비 Business Risk로 추가 탐지된 취약점 상세",
                            ["vuln_id", "package", "cvss_gate", "biz_gate",
-                            "biz_category", "final_score"],
+                            "biz_category", "final_score", "connected_api"],
                            registry=registry)
         for v in (cvss_comparison.get("upgraded") or []):
             vid  = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("cve", "N/A"))[:80]) or "N_A"
             pkg  = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("pkg", "unknown"))[:60]) or "unknown"
             cat  = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("bizCat", "unknown"))[:30]) or "unknown"
+            apis = v.get("connectedApis", [])
+            conn = re.sub(r"[^a-zA-Z0-9_.:\-/]", "_", str(apis[0])[:80]) if apis else "-"
             g_upgraded.labels(
-                vuln_id=vid,
-                package=pkg,
+                vuln_id=vid, package=pkg,
                 cvss_gate=str(v.get("cvssGate", "")),
                 biz_gate=str(v.get("bizGate", "")),
                 biz_category=cat,
-                final_score=str(round(float(v.get("final", 0)), 2))
+                final_score=str(round(float(v.get("final", 0)), 2)),
+                connected_api=conn
             ).set(float(v.get("cvss", 0)))
 
         g_downgraded = Gauge("cvss_downgraded_detail",
                              "CVSS Block → Business Risk Pass (과잉 차단 방지) 상세",
-                             ["vuln_id", "package", "cvss_gate", "biz_gate",
-                              "biz_category", "final_score"],
+                             ["vuln_id", "package", "cvss_gate", "biz_gate", "biz_category", "final_score"],
                              registry=registry)
         for v in (cvss_comparison.get("downgraded") or []):
-            vid  = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("cve", "N/A"))[:80]) or "N_A"
-            pkg  = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("pkg", "unknown"))[:60]) or "unknown"
-            cat  = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("bizCat", "unknown"))[:30]) or "unknown"
+            vid = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("cve", "N/A"))[:80]) or "N_A"
+            pkg = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("pkg", "unknown"))[:60]) or "unknown"
+            cat = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(v.get("bizCat", "unknown"))[:30]) or "unknown"
             g_downgraded.labels(
-                vuln_id=vid,
-                package=pkg,
+                vuln_id=vid, package=pkg,
                 cvss_gate=str(v.get("cvssGate", "")),
                 biz_gate=str(v.get("bizGate", "")),
                 biz_category=cat,
@@ -670,7 +581,7 @@ def main():
     merged_vulns      = load_merged_vulns()
     biz_risk          = load_business_risk()
     swagger_high_risk = load_swagger_high_risk()
-    cvss_comparison   = load_cvss_comparison()   # 신규
+    cvss_comparison   = load_cvss_comparison()
     semgrep_count     = len(semgrep_vulns)
 
     all_vulns = trivy_vulns + npm_vulns + owasp_vulns + semgrep_vulns
@@ -681,11 +592,8 @@ def main():
         for v in merged_vulns:
             sev = v.get("severity", "LOW").upper()
             merged_for_score.append({
-                "tool"    : v.get("source", "merged"),
-                "cve"     : v.get("vuln_id", ""),
-                "severity": sev,
-                "package" : v.get("package", "unknown"),
-                "cvss"    : safe_cvss(v),
+                "tool": v.get("source", "merged"), "cve": v.get("vuln_id", ""),
+                "severity": sev, "package": v.get("package", "unknown"), "cvss": safe_cvss(v),
             })
         agg = aggregate(merged_for_score)
     else:
@@ -699,10 +607,8 @@ def main():
     confidence     = calc_confidence(merged_vulns) if merged_vulns else {"single": 0, "double": 0, "triple": 0}
     attack_surface = parse_attack_surface()
     vuln_change    = calc_vuln_change(agg["by_severity"])
-
-    block_count  = sum(1 for v in biz_risk if float(v.get("finalScore", 0)) >= 14.0)
-
-    build_status = 0 if (risk["action"] == "BLOCK" or block_count > 0) else 1
+    block_count    = sum(1 for v in biz_risk if float(v.get("finalScore", 0)) >= 14.0)
+    build_status   = 0 if (risk["action"] == "BLOCK" or block_count > 0) else 1
 
     log.info("[Build Status] " + ("FAIL" if build_status == 0 else "PASS") +
              " | score=" + str(risk["risk_score"]) +
@@ -715,7 +621,7 @@ def main():
         attack_surface=attack_surface, vuln_change=vuln_change,
         total_raw=agg_all["total"], swagger_high_risk=swagger_high_risk,
         merged_vulns=merged_vulns, biz_scores=biz_risk,
-        cvss_comparison=cvss_comparison   # 신규
+        cvss_comparison=cvss_comparison
     )
 
     log.info("=" * 60)
