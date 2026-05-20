@@ -121,7 +121,7 @@ pipeline {
                     }
 
                     writeFile file: "${WORKSPACE}/output/merge_vulns.py", text: '''
-import json, os, re
+import json, os, re, math
 from collections import Counter
 
 WS = os.environ["WORKSPACE"]
@@ -140,6 +140,52 @@ SEV_MAP = {"critical":"CRITICAL","high":"HIGH","moderate":"MEDIUM","medium":"MED
 def norm_sev(s):
     return SEV_MAP.get((s or "").lower(), "UNKNOWN")
 
+# ── CVSS v3 vector 파싱 → 점수 계산 ──────────────────────────────────────────
+def cvss_v3_from_vector(vector_str):
+    """CVSS v3.x vector string → base score (float). 실패 시 None 반환."""
+    try:
+        if not vector_str or "CVSS:3" not in vector_str:
+            return None
+        parts = vector_str.split("/")
+        # AV, AC, PR, UI, S, C, I, A 순서로 파싱
+        m = {}
+        for p in parts[1:]:
+            if ":" in p:
+                k, v = p.split(":", 1)
+                m[k] = v
+
+        AV  = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.20}.get(m.get("AV","N"), 0.85)
+        AC  = {"L": 0.77, "H": 0.44}.get(m.get("AC","L"), 0.77)
+        PR_scope = m.get("S","U")
+        PR_map = {"N": {"U":0.85,"C":0.85}, "L": {"U":0.62,"C":0.68}, "H": {"U":0.27,"C":0.50}}
+        PR  = PR_map.get(m.get("PR","N"), {"U":0.85,"C":0.85}).get(PR_scope, 0.85)
+        UI  = {"N": 0.85, "R": 0.62}.get(m.get("UI","N"), 0.85)
+        SC  = {"N": 0.00, "L": 0.22, "H": 0.56}.get(m.get("C","N"), 0.00)
+        SI  = {"N": 0.00, "L": 0.22, "H": 0.56}.get(m.get("I","N"), 0.00)
+        SA  = {"N": 0.00, "L": 0.22, "H": 0.56}.get(m.get("A","N"), 0.00)
+
+        ISS = 1 - (1 - SC) * (1 - SI) * (1 - SA)
+        if PR_scope == "U":
+            Impact = 6.42 * ISS
+        else:
+            Impact = 7.52 * (ISS - 0.029) - 3.25 * math.pow(ISS - 0.02, 15)
+
+        Exploitability = 8.22 * AV * AC * PR * UI
+
+        if Impact <= 0:
+            BaseScore = 0.0
+        else:
+            if PR_scope == "U":
+                BaseScore = min((Impact + Exploitability), 10)
+            else:
+                BaseScore = min(1.08 * (Impact + Exploitability), 10)
+
+        # 올림 처리 (소수점 1자리)
+        BaseScore = math.ceil(BaseScore * 10) / 10
+        return round(BaseScore, 1)
+    except Exception:
+        return None
+
 def parse_trivy(paths):
     vulns = {}
     for path in paths:
@@ -153,13 +199,23 @@ def parse_trivy(paths):
                 if not vid:
                     continue
                 cvss = None
+                cvss_source = "missing"
                 for src in (v.get("CVSS") or {}).values():
                     val = float(src.get("V3Score") or src.get("V2Score") or 0)
                     if val > 0:
                         cvss = max(cvss, val) if cvss is not None else val
+                        cvss_source = "trivy"
                 prev = vulns.get(vid)
                 if prev is None or (cvss is not None and (prev["cvss"] is None or cvss > prev["cvss"])):
-                    vulns[vid] = {"vuln_id":vid,"package":v.get("PkgName",""),"version":v.get("InstalledVersion",""),"severity":v.get("Severity","UNKNOWN"),"cvss":cvss,"source":"trivy"}
+                    vulns[vid] = {
+                        "vuln_id": vid,
+                        "package": v.get("PkgName", ""),
+                        "version": v.get("InstalledVersion", ""),
+                        "severity": v.get("Severity", "UNKNOWN"),
+                        "cvss": cvss,
+                        "cvss_source": cvss_source,
+                        "source": "trivy"
+                    }
     print("[Trivy] " + str(len(vulns)) + " entries")
     return vulns
 
@@ -183,6 +239,7 @@ def parse_owasp_json(path):
                 continue
             sev = sev_map.get(vuln.get("severity", "").upper(), "UNKNOWN")
             cvss = None
+            cvss_source = "missing"
             for key in ["cvssv3", "cvssV3", "cvss3"]:
                 cvssv3 = vuln.get(key) or {}
                 for score_key in ["baseScore", "score"]:
@@ -192,6 +249,7 @@ def parse_owasp_json(path):
                             f = float(val)
                             if f > 0:
                                 cvss = f
+                                cvss_source = "owasp_v3"
                                 break
                         except (ValueError, TypeError):
                             pass
@@ -207,6 +265,7 @@ def parse_owasp_json(path):
                                 f = float(val)
                                 if f > 0:
                                     cvss = f
+                                    cvss_source = "owasp_v2"
                                     break
                             except (ValueError, TypeError):
                                 pass
@@ -214,7 +273,10 @@ def parse_owasp_json(path):
                         break
             prev = vulns.get(vid)
             if prev is None or (cvss is not None and (prev["cvss"] is None or cvss > prev["cvss"])):
-                vulns[vid] = {"vuln_id":vid,"package":pkg,"version":"","severity":sev,"cvss":cvss,"source":"owasp"}
+                vulns[vid] = {
+                    "vuln_id": vid, "package": pkg, "version": "",
+                    "severity": sev, "cvss": cvss, "cvss_source": cvss_source, "source": "owasp"
+                }
     print("[OWASP] " + str(len(vulns)) + " entries")
     return vulns
 
@@ -244,9 +306,13 @@ def parse_npm(paths):
                         continue
                 raw_score = float((via.get("cvss") or {}).get("score") or 0)
                 cvss = raw_score if raw_score > 0 else None
+                cvss_source = "npm" if cvss else "missing"
                 prev = vulns.get(vid)
                 if prev is None or (cvss is not None and (prev["cvss"] is None or cvss > prev["cvss"])):
-                    vulns[vid] = {"vuln_id":vid,"package":pkg_name,"version":info.get("range",""),"severity":sev,"cvss":cvss,"source":"npm"}
+                    vulns[vid] = {
+                        "vuln_id": vid, "package": pkg_name, "version": info.get("range", ""),
+                        "severity": sev, "cvss": cvss, "cvss_source": cvss_source, "source": "npm"
+                    }
     print("[npm] " + str(len(vulns)) + " entries")
     return vulns
 
@@ -261,64 +327,95 @@ def merge(trivy, owasp, npm):
                     entry = d[vid].copy()
                 else:
                     a, b = entry["cvss"], d[vid]["cvss"]
-                    entry["cvss"] = max(a,b) if a is not None and b is not None else (a if a is not None else b)
+                    if a is None and b is not None:
+                        entry["cvss"] = b
+                        entry["cvss_source"] = d[vid]["cvss_source"]
+                    elif a is not None and b is not None and b > a:
+                        entry["cvss"] = b
+                        entry["cvss_source"] = d[vid]["cvss_source"]
         entry["source"] = "+".join(sources)
         entry["source_count"] = len(sources)
         merged.append(entry)
     merged.sort(key=lambda x: x["cvss"] if x["cvss"] is not None else -1, reverse=True)
     return merged
 
-def fetch_cvss_from_osv(vuln_id):
-    import urllib.request, urllib.error
+def fetch_osv(vuln_id):
+    """OSV API 조회 — CVSS 숫자 또는 vector 반환"""
+    import urllib.request
     try:
         url = "https://api.osv.dev/v1/vulns/" + vuln_id
         req = urllib.request.Request(url, headers={"User-Agent": "juice-pipeline/1.0"})
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+
+        # 1) database_specific 숫자 점수
         db = data.get("database_specific", {})
         for key in ["cvss_score", "cvss", "severity_score"]:
             score = db.get(key)
             if score:
                 try:
-                    return float(score)
+                    f = float(score)
+                    if f > 0:
+                        return f, "osv_db"
                 except (ValueError, TypeError):
                     pass
+
+        # 2) affected[].database_specific 숫자 점수
         for aff in data.get("affected", []):
             db2 = aff.get("database_specific", {})
             for key in ["cvss_score", "cvss"]:
                 score2 = db2.get(key)
                 if score2:
                     try:
-                        return float(score2)
+                        f = float(score2)
+                        if f > 0:
+                            return f, "osv_db"
                     except (ValueError, TypeError):
                         pass
+
+        # 3) severity[].score 숫자
         for sev in data.get("severity", []):
             raw = sev.get("score", "")
             try:
-                val = float(raw)
-                if val > 0:
-                    return val
+                f = float(raw)
+                if f > 0:
+                    return f, "osv_score"
             except (ValueError, TypeError):
                 pass
-        return None
-    except Exception:
-        return None
+            # vector string → 계산
+            if isinstance(raw, str) and "CVSS:3" in raw:
+                calc = cvss_v3_from_vector(raw)
+                if calc and calc > 0:
+                    return calc, "osv_vector"
 
-def enrich_cvss_from_osv(merged):
+        return None, None
+    except Exception:
+        return None, None
+
+def enrich_cvss(merged):
+    """CVSS 없는 항목을 OSV API로 보완 (vector 파싱 포함)"""
     targets = [v for v in merged if v["cvss"] is None
-               and (v["vuln_id"].startswith("GHSA-") or v["vuln_id"].startswith("CVE-"))]
+               and (v["vuln_id"].startswith("GHSA-") or
+                    v["vuln_id"].startswith("CVE-") or
+                    v["vuln_id"].startswith("NSWG-"))]
+
     if not targets:
         print("[OSV] CVSS 없는 항목 없음 — 스킵")
         return merged
+
     print("[OSV] CVSS 보완 시도: " + str(len(targets)) + "개")
     hit, miss = 0, 0
     for v in targets:
-        score = fetch_cvss_from_osv(v["vuln_id"])
+        score, src = fetch_osv(v["vuln_id"])
         if score and score > 0:
             v["cvss"] = score
+            v["cvss_source"] = src
             hit += 1
+            print("[OSV] " + v["vuln_id"] + " → " + str(score) + " (" + src + ")")
         else:
+            v["cvss_source"] = "missing"
             miss += 1
+
     print("[OSV] 보완 성공: " + str(hit) + "개 / 실패: " + str(miss) + "개")
     merged.sort(key=lambda x: x["cvss"] if x["cvss"] is not None else -1, reverse=True)
     return merged
@@ -328,9 +425,12 @@ owasp  = parse_owasp_json(OWASP_JSON)
 npm    = parse_npm(NPM_FILES)
 merged = merge(trivy, owasp, npm)
 print("[merged] total=" + str(len(merged)))
-merged = enrich_cvss_from_osv(merged)
+
+merged = enrich_cvss(merged)
+
 none_count = sum(1 for v in merged if v["cvss"] is None)
-print("[CVSS 없음] 최종 " + str(none_count) + "개")
+print("[CVSS 없음] 최종 " + str(none_count) + "개 (cvss_source=missing)")
+
 with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     json.dump(merged, f, indent=2, ensure_ascii=False)
 print("[저장] " + OUTPUT_FILE)
@@ -555,23 +655,22 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                                                 }
                                             }
                                         }
-                                        if (cvss == 0.0) cvss = v.Severity == 'CRITICAL' ? 9.0 : 7.0
                                         vulnList.add([vuln_id:v.VulnerabilityID?:'', package:v.PkgName?:'',
                                             version:v.InstalledVersion?:'', severity:v.Severity?:'',
-                                            cvss:cvss, source:'trivy', source_count:1])
+                                            cvss: cvss > 0.0 ? cvss : null,
+                                            cvss_source: cvss > 0.0 ? 'trivy' : 'missing',
+                                            source:'trivy', source_count:1])
                                     }
                                 }
                             }
 
                             vulnList.each { vuln ->
                                 def rawCvss   = vuln.cvss
-                                def cvssScore = 0.0
+                                def cvssScore = null
                                 try {
                                     if (rawCvss != null && !(rawCvss instanceof net.sf.json.JSONNull))
                                         cvssScore = rawCvss as double
-                                } catch (Exception e) { cvssScore = 0.0 }
-                                if (cvssScore == 0.0)
-                                    cvssScore = (vuln.severity == 'CRITICAL') ? 9.0 : 7.0
+                                } catch (Exception e) { cvssScore = null }
 
                                 def pkgName     = (vuln.package ?: '').toLowerCase()
                                 def bizScore    = 0
@@ -611,11 +710,18 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                                 def srcCount    = (vuln.source_count != null) ? (vuln.source_count as int) : 1
                                 def trustWeight = TRUST_WEIGHTS[Math.min(srcCount, TRUST_WEIGHTS.size()-1)] as double
                                 def effectiveBiz = bizScore > 0 ? bizScore : 2
-                                def rawScore     = cvssScore * reachability * effectiveBiz * trustWeight
-                                def finalScore   = Math.min((rawScore / MAX_RAW) * 20.0 as double, 20.0 as double)
-                                def gate = finalScore >= 14.0 ? 'Block' : finalScore >= 8.0 ? 'Warn' : 'Pass'
 
-                                // ── 신규: 연결된 API 엔드포인트 추출 (bizCategory 기반) ──
+                                // CVSS 없으면 finalScore 계산 불가 → null 처리
+                                def rawScore  = null
+                                def finalScore = null
+                                def gate = 'Unknown'
+                                if (cvssScore != null) {
+                                    rawScore   = cvssScore * reachability * effectiveBiz * trustWeight
+                                    finalScore = Math.min((rawScore / MAX_RAW) * 20.0 as double, 20.0 as double)
+                                    gate = finalScore >= 14.0 ? 'Block' : finalScore >= 8.0 ? 'Warn' : 'Pass'
+                                }
+
+                                // 연결 API (bizCategory 기반)
                                 def connectedApis = []
                                 if (bizCategory != 'internal') {
                                     swaggerEndpoints.each { ep ->
@@ -635,7 +741,8 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                                         }
                                     }
                                 }
-                                // Semgrep에서 발견된 파일 경로도 추가
+
+                                // Semgrep 파일
                                 def semgrepFiles = []
                                 semgrepFindings.each { f ->
                                     if (pkgName.length() >= 4 &&
@@ -652,6 +759,7 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                                     cve          : vuln.vuln_id ?: '',
                                     severity     : vuln.severity ?: '',
                                     cvss         : cvssScore,
+                                    cvss_source  : vuln.cvss_source ?: 'missing',
                                     bizCategory  : bizCategory,
                                     bizScore     : bizScore,
                                     matchedKw    : matchedKw,
@@ -662,31 +770,38 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                                     finalScore   : finalScore,
                                     gate         : gate,
                                     source       : vuln.source ?: '',
-                                    connectedApis: connectedApis,   // 신규
-                                    semgrepFiles : semgrepFiles      // 신규
+                                    connectedApis: connectedApis,
+                                    semgrepFiles : semgrepFiles
                                 ])
                             }
                         }
 
                         def n = vulnBusinessScores.size()
                         for (int i = 0; i < n-1; i++)
-                            for (int j = 0; j < n-i-1; j++)
-                                if ((vulnBusinessScores[j].finalScore as double) < (vulnBusinessScores[j+1].finalScore as double)) {
+                            for (int j = 0; j < n-i-1; j++) {
+                                def fj  = vulnBusinessScores[j].finalScore
+                                def fj1 = vulnBusinessScores[j+1].finalScore
+                                def vj  = fj  != null ? (fj  as double) : -1.0
+                                def vj1 = fj1 != null ? (fj1 as double) : -1.0
+                                if (vj < vj1) {
                                     def tmp = vulnBusinessScores[j]
                                     vulnBusinessScores[j] = vulnBusinessScores[j+1]
                                     vulnBusinessScores[j+1] = tmp
                                 }
+                            }
 
                         def top10 = vulnBusinessScores.take(10)
                         echo "====== TOP 10 ======"
                         top10.eachWithIndex { v, i ->
-                            echo "${i+1}. ${v.cve} | ${v.pkg}@${v.version} | CVSS:${v.cvss} | ${v.bizCategory}(+${v.bizScore}) | final:${String.format('%.2f',v.finalScore as double)}/20 | ${v.gate} | APIs:${v.connectedApis}"
+                            def fs = v.finalScore != null ? String.format('%.2f', v.finalScore as double) : 'N/A'
+                            echo "${i+1}. ${v.cve} | ${v.pkg}@${v.version} | CVSS:${v.cvss}(${v.cvss_source}) | ${v.bizCategory}(+${v.bizScore}) | final:${fs}/20 | ${v.gate}"
                         }
 
-                        def blockCount = vulnBusinessScores.count { (it.finalScore as double) >= 14.0 }
-                        def warnCount  = vulnBusinessScores.count { s -> def f = s.finalScore as double; f >= 8.0 && f < 14.0 }
-                        def passCount  = vulnBusinessScores.count { (it.finalScore as double) < 8.0 }
-                        echo "Block:${blockCount} Warn:${warnCount} Pass:${passCount}"
+                        def blockCount   = vulnBusinessScores.count { it.gate == 'Block' }
+                        def warnCount    = vulnBusinessScores.count { it.gate == 'Warn' }
+                        def passCount    = vulnBusinessScores.count { it.gate == 'Pass' }
+                        def unknownCount = vulnBusinessScores.count { it.gate == 'Unknown' }
+                        echo "Block:${blockCount} Warn:${warnCount} Pass:${passCount} Unknown(CVSS없음):${unknownCount}"
 
                         writeJSON file: "${WORKSPACE}/output/business-risk-result.json", json: vulnBusinessScores
                         echo "Business Context Analysis done"
@@ -809,18 +924,32 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                     }
 
                     def bizJson    = readJSON file: "${WORKSPACE}/output/business-risk-result.json"
-                    def upgraded   = []
-                    def downgraded = []
+                    def upgraded   = []  // CVSS로는 못 잡는데 우리가 Block한 것
+                    def downgraded = []  // CVSS로는 Block인데 우리는 Pass (과잉 차단 방지)
+                    def unknown    = []  // CVSS 없어서 판단 불가
 
                     bizJson.each { v ->
-                        def cvss = 0.0
+                        def cvss = null
                         try {
                             def raw = v.cvss
                             if (raw != null && !(raw instanceof net.sf.json.JSONNull))
                                 cvss = raw as double
-                        } catch (Exception e) { cvss = 0.0 }
+                        } catch (Exception e) { cvss = null }
 
-                        def bizGate  = v.gate ?: 'Pass'
+                        def bizGate = v.gate ?: 'Unknown'
+
+                        // CVSS 없으면 Unknown 분리
+                        if (cvss == null) {
+                            unknown.add([
+                                cve    : v.cve         ?: '',
+                                pkg    : v.pkg         ?: '',
+                                bizGate: bizGate,
+                                bizCat : v.bizCategory ?: '',
+                                final  : v.finalScore
+                            ])
+                            return
+                        }
+
                         def cvssGate = cvss >= 9.0 ? 'Block' :
                                        cvss >= 7.0 ? 'Warn'  : 'Pass'
 
@@ -829,6 +958,7 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                                 cve          : v.cve          ?: '',
                                 pkg          : v.pkg          ?: '',
                                 cvss         : cvss,
+                                cvss_source  : v.cvss_source  ?: 'missing',
                                 cvssGate     : cvssGate,
                                 bizGate      : bizGate,
                                 bizScore     : v.bizScore     ?: 0,
@@ -842,15 +972,16 @@ print("high_risk count=" + str(len(summary["high_risk"])))
 
                         if (cvssGate == 'Block' && bizGate == 'Pass') {
                             downgraded.add([
-                                cve     : v.cve         ?: '',
-                                pkg     : v.pkg         ?: '',
-                                cvss    : cvss,
-                                cvssGate: cvssGate,
-                                bizGate : bizGate,
-                                bizScore: v.bizScore    ?: 0,
-                                bizCat  : v.bizCategory ?: '',
-                                reach   : v.reachability ?: 1.0,
-                                final   : v.finalScore  ?: 0.0
+                                cve        : v.cve         ?: '',
+                                pkg        : v.pkg         ?: '',
+                                cvss       : cvss,
+                                cvss_source: v.cvss_source ?: 'missing',
+                                cvssGate   : cvssGate,
+                                bizGate    : bizGate,
+                                bizScore   : v.bizScore    ?: 0,
+                                bizCat     : v.bizCategory ?: '',
+                                reach      : v.reachability ?: 1.0,
+                                final      : v.finalScore  ?: 0.0
                             ])
                         }
                     }
@@ -867,15 +998,22 @@ print("high_risk count=" + str(len(summary["high_risk"])))
                     downgraded.each { v ->
                         echo "  ${v.cve} | ${v.pkg} | CVSS:${v.cvss}(${v.cvssGate}) → BizRisk:${String.format('%.2f', v.final as double)}점(${v.bizGate}) | ${v.bizCat}(×${v.bizScore})"
                     }
+                    echo ""
+                    echo "[CVSS 없어 판단 불가 — Unknown] ${unknown.size()}개"
+                    unknown.each { v ->
+                        echo "  ${v.cve} | ${v.pkg} | BizGate:${v.bizGate} | ${v.bizCat}"
+                    }
                     echo "========================================"
 
                     writeJSON file: "${WORKSPACE}/output/cvss-comparison.json",
                               json: [
                                   upgraded  : upgraded,
                                   downgraded: downgraded,
+                                  unknown   : unknown,
                                   summary   : [
                                       upgraded_count  : upgraded.size(),
-                                      downgraded_count: downgraded.size()
+                                      downgraded_count: downgraded.size(),
+                                      unknown_count   : unknown.size()
                                   ]
                               ]
                 }
@@ -919,10 +1057,12 @@ print("high_risk count=" + str(len(summary["high_risk"])))
 
                     def upgradedCount   = 0
                     def downgradedCount = 0
+                    def unknownCount    = 0
                     if (fileExists("${WORKSPACE}/output/cvss-comparison.json")) {
                         def compJson = readJSON file: "${WORKSPACE}/output/cvss-comparison.json"
                         upgradedCount   = compJson.summary?.upgraded_count   ?: 0
                         downgradedCount = compJson.summary?.downgraded_count ?: 0
+                        unknownCount    = compJson.summary?.unknown_count    ?: 0
                     }
 
                     def metrics = """# HELP trivy_pipe_risk_score Business Risk Score (20점 기준)
@@ -958,6 +1098,9 @@ trivy_pipe_cvss_upgraded_count ${upgradedCount}
 # HELP trivy_pipe_cvss_downgraded_count CVSS Block → BizRisk Pass (과잉 차단 방지)
 # TYPE trivy_pipe_cvss_downgraded_count gauge
 trivy_pipe_cvss_downgraded_count ${downgradedCount}
+# HELP trivy_pipe_cvss_unknown_count CVSS 없어 판단 불가
+# TYPE trivy_pipe_cvss_unknown_count gauge
+trivy_pipe_cvss_unknown_count ${unknownCount}
 """
                     writeFile file: "${WORKSPACE}/output/metrics.txt", text: metrics
                     sh """
