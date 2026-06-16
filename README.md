@@ -1,6 +1,6 @@
-# Security-Aware CI Pipeline
+# supplychain&Security-Aware CI Pipeline
 
-> SAST 결과를 기반으로 서비스 맥락을 반영한 위험도를 산정하고, 위험 수준에 따라 Jenkins 빌드를 자동 차단하는 Risk-Based Security Gate 프로젝트
+> 소프트웨어 패키지 공급망에 대한 CVSS 점수 및 SAST 결과를 기반으로 서비스 맥락을 반영한 위험도를 산정하고, 위험 수준에 따라 Jenkins 빌드를 자동 차단하는 Risk-Based Security Gate 프로젝트
 
 ---
 
